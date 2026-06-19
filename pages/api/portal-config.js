@@ -22,6 +22,8 @@ const SHEETS = {
     'English Grammar':   '1rsoL-ZBgcejtefzZ1KjR2DRcyxMhSVbwgO7Mu6IC65U',
     'Social Studies':    '1H4tLGOZBXWNeQbXAtlCtSktMvzwcEdwmiEvQpyD9xqs',
     'General Knowledge': '1AcPo8DPmZYJeno3kYTgvPO2sS8GcEQJX6guDLJ3qfWA',
+    'Artificial Intelegence': '1GL0oIaFc3TnyTrMIZmqpWTBrYfb-Me8k5X8WwZKCE2I',
+
   },
 };
 
