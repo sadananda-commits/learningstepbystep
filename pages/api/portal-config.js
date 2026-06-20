@@ -87,7 +87,14 @@ function rowsToObjects(rows) {
 async function fetchTab(sheetId, tabName) {
   const res = await fetch(CSV_URL(sheetId, tabName));
   if (!res.ok) throw new Error(`Sheet ${sheetId} tab "${tabName}" returned ${res.status}`);
-  const text = await res.text();
+  // IMPORTANT: don't use res.text() here. Google's gviz CSV export endpoint
+  // doesn't always send a reliable charset in its Content-Type header, and
+  // Response.text() falls back to guessing — which can misdecode UTF-8 bytes
+  // (em-dashes, emoji, curly quotes) as Latin-1/Windows-1252, producing
+  // garbled "mojibake" text like "â€”" instead of "—". Reading the raw bytes
+  // and explicitly decoding as UTF-8 sidesteps that guesswork entirely.
+  const buf  = await res.arrayBuffer();
+  const text = new TextDecoder('utf-8').decode(buf);
   // Google returns an HTML error page (not CSV) if the sheet/tab isn't
   // shared or doesn't exist — catch that case explicitly.
   if (text.trimStart().startsWith('<')) {
