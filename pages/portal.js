@@ -38,11 +38,12 @@ const FALLBACK = {
   navigation:[
     {ID:'dashboard',     Label:'Dashboard',        'Icon (FontAwesome solid)':'fa-chart-pie',      Active:true,Order:1},
     {ID:'progress',      Label:'Academic Progress', 'Icon (FontAwesome solid)':'fa-chart-line',     Active:true,Order:2},
-    {ID:'attendance',    Label:'Attendance',        'Icon (FontAwesome solid)':'fa-calendar-check', Active:true,Order:3},
-    {ID:'assignments',   Label:'Assignments',       'Icon (FontAwesome solid)':'fa-book-open',      Active:true,Order:4},
-    {ID:'schedule',      Label:'Upcoming Classes',  'Icon (FontAwesome solid)':'fa-clock',          Active:true,Order:5},
-    {ID:'notifications', Label:'Notifications',     'Icon (FontAwesome solid)':'fa-bell',           Active:true,Order:6},
-    {ID:'profile',       Label:'My Profile',        'Icon (FontAwesome solid)':'fa-user-circle',    Active:true,Order:7},
+    {ID:'leaderboard',   Label:'Leaderboard',       'Icon (FontAwesome solid)':'fa-trophy',         Active:true,Order:3},
+    {ID:'attendance',    Label:'Attendance',        'Icon (FontAwesome solid)':'fa-calendar-check', Active:true,Order:4},
+    {ID:'assignments',   Label:'Assignments',       'Icon (FontAwesome solid)':'fa-book-open',      Active:true,Order:5},
+    {ID:'schedule',      Label:'Upcoming Classes',  'Icon (FontAwesome solid)':'fa-clock',          Active:true,Order:6},
+    {ID:'notifications', Label:'Notifications',     'Icon (FontAwesome solid)':'fa-bell',           Active:true,Order:7},
+    {ID:'profile',       Label:'My Profile',        'Icon (FontAwesome solid)':'fa-user-circle',    Active:true,Order:8},
   ],
   dashStats:[
     {'Metric Key':'attendance_pct',   Label:'Attendance',               Value:'85%','Sub-label':'This term',      'Display Order':1,Active:true},
@@ -340,6 +341,118 @@ function isRowActive(v) {
   return !(s === 'false' || s === 'no' || s === 'n' || s === '0' || s === 'inactive');
 }
 
+// Folds raw StudentProgress rows (one row per answered question, as written
+// by recordAnswer()/api/student/progress) back into the same per-module
+// summary shape (`{attempted, correct, incorrect, completionPct, startedAt,
+// completedAt, answers}`) that LearningModulePlayer and the dashboard already
+// expect from localStorage. Used to rebuild a student's progress on a device
+// that doesn't have it cached locally. Keeps only the latest row per
+// (module, question) in case a question was somehow synced more than once.
+//
+// `totalStepsFor(moduleId)` lets us compute completionPct/completedAt
+// correctly (raw rows alone don't carry the module's total question count).
+function rebuildLearnProgressFromRows(rows, totalStepsFor) {
+  const latestByModuleQuestion = {}; // "moduleId|questionNumber" -> row
+  rows.forEach(r => {
+    const key = `${r.ModuleID}|${r.QuestionNumber}`;
+    const existing = latestByModuleQuestion[key];
+    if (!existing || String(r.Timestamp||'') > String(existing.Timestamp||'')) {
+      latestByModuleQuestion[key] = r;
+    }
+  });
+
+  const byModule = {};
+  Object.values(latestByModuleQuestion).forEach(r => {
+    const moduleId = r.ModuleID;
+    if (!moduleId) return;
+    if (!byModule[moduleId]) byModule[moduleId] = { answers:{}, timestamps:[] };
+    const isCorrect = String(r.Status||'').trim().toLowerCase() === 'correct';
+    byModule[moduleId].answers[r.QuestionNumber] = { isCorrect, selected: r.AnswerGiven };
+    if (r.Timestamp) byModule[moduleId].timestamps.push(r.Timestamp);
+  });
+
+  const result = {};
+  Object.keys(byModule).forEach(moduleId => {
+    const { answers, timestamps } = byModule[moduleId];
+    const attempted = Object.keys(answers).length;
+    const correct   = Object.values(answers).filter(a=>a.isCorrect).length;
+    timestamps.sort();
+    const total = totalStepsFor ? totalStepsFor(moduleId) : 0;
+    const isComplete = total > 0 && attempted >= total;
+    result[moduleId] = {
+      startedAt: timestamps[0] || null,
+      completedAt: isComplete ? (timestamps[timestamps.length-1] || null) : null,
+      attempted, correct, incorrect: attempted - correct,
+      completionPct: total > 0 ? Math.round((attempted/total)*100) : 0,
+      answers,
+    };
+  });
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACHIEVEMENTS — computed live from real progress data (SUBJ + learnProgress),
+// never hardcoded per student. The requirements doc names specific examples
+// (Maths Explorer, Grammar Champion, Science Star) tied to fixed subjects —
+// generalized here into a per-subject "Explorer" badge so it automatically
+// covers whatever subjects a teacher has configured in the sheet (including
+// ones that don't exist yet, like a future Class 6 subject), rather than
+// hardcoding five subject names that would silently stop working the moment
+// the subject list changes.
+function computeAchievements(SUBJ, learnProgress) {
+  const badges = [];
+  const allProgress = Object.values(learnProgress);
+  const totalAttempted = allProgress.reduce((s,p)=>s+(p?.attempted||0),0);
+  const totalCorrect   = allProgress.reduce((s,p)=>s+(p?.correct||0),0);
+  const completedCount = allProgress.filter(p=>p?.completedAt).length;
+
+  // One "Explorer" badge per subject the student has made real headway in.
+  SUBJ.forEach(s => {
+    if (s['Progress %'] >= 50) {
+      badges.push({
+        id: `explorer-${s.Subject}`,
+        label: `${s.Subject} Explorer`,
+        icon: 'fa-compass',
+        color: s['Color (Hex)'],
+        detail: `${s['Topics Done']}/${s['Total Topics']} topics in ${s.Subject}`,
+      });
+    }
+    if (s['Total Topics'] > 0 && s['Topics Done'] === s['Total Topics']) {
+      badges.push({
+        id: `champion-${s.Subject}`,
+        label: `${s.Subject} Champion`,
+        icon: 'fa-crown',
+        color: s['Color (Hex)'],
+        detail: `Completed every topic in ${s.Subject}`,
+      });
+    }
+  });
+
+  // Fast Learner — finished at least one topic in under 10 minutes start-to-finish.
+  const fastCompletion = allProgress.find(p => {
+    if (!p?.startedAt || !p?.completedAt) return false;
+    const mins = (new Date(p.completedAt) - new Date(p.startedAt)) / 60000;
+    return mins > 0 && mins < 10;
+  });
+  if (fastCompletion) {
+    badges.push({ id:'fast-learner', label:'Fast Learner', icon:'fa-bolt', color:'#f5a623', detail:'Completed a topic in under 10 minutes' });
+  }
+
+  // Consistent Performer — active across multiple subjects, not just one burst.
+  const subjectsWithActivity = SUBJ.filter(s => s['Topics Done'] > 0).length;
+  if (subjectsWithActivity >= 3 || completedCount >= 5) {
+    badges.push({ id:'consistent', label:'Consistent Performer', icon:'fa-medal', color:'#00c6a7', detail: subjectsWithActivity>=3 ? `Active across ${subjectsWithActivity} subjects` : `${completedCount} topics completed` });
+  }
+
+  // Perfectionist — at least one topic completed with a perfect score.
+  const perfectTopic = allProgress.find(p => p?.completedAt && p.attempted>0 && p.correct===p.attempted);
+  if (perfectTopic) {
+    badges.push({ id:'perfectionist', label:'Perfectionist', icon:'fa-star', color:'#a855f7', detail:'Scored 100% on a topic' });
+  }
+
+  return { badges, totalAttempted, totalCorrect, accuracy: totalAttempted ? Math.round((totalCorrect/totalAttempted)*100) : 0, completedCount };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERACTIVE LEARNING — topic grid, intro, step-by-step lesson, completion
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,16 +525,23 @@ function LearningModulesGrid({ modules, stepsFor, progressMap, onOpen }) {
   );
 }
 
-function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLabel='Back to topics' }) {
+function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExit, backLabel='Back to topics' }) {
   const total = steps.length;
   const attemptedCount = progress?.answers ? Object.keys(progress.answers).length : 0;
   const isComplete = !!progress?.completedAt;
 
   const [view,     setView]     = useState('intro'); // intro | lesson | complete
   const [idx,      setIdx]      = useState(0);
-  const [selected, setSelected] = useState(null);
-  const [locked,   setLocked]   = useState(false);
   const [answers,  setAnswers]  = useState(progress?.answers || {});
+
+  // selected/locked are derived from answers+idx rather than tracked as their
+  // own state — this is what makes Previous/Next safe: jumping to any step
+  // (forward or backward) automatically shows that step's saved answer
+  // (locked, colored correct/incorrect) if one exists, or a fresh unanswered
+  // question if it doesn't, with no extra bookkeeping to keep in sync.
+  const currentAnswer = answers[steps[idx]?.['Step Number']];
+  const selected = currentAnswer?.selected ?? null;
+  const locked   = !!currentAnswer;
 
   if (!module || !total) {
     return (
@@ -435,7 +555,7 @@ function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLab
   const step = steps[idx];
 
   const begin = fromIdx => {
-    setIdx(fromIdx); setSelected(null); setLocked(false);
+    setIdx(fromIdx);
     if (!progress?.startedAt) onSave({ startedAt:new Date().toISOString(), attempted:0, correct:0, incorrect:0, completionPct:0, answers:{} });
     setView('lesson');
   };
@@ -449,7 +569,6 @@ function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLab
   const choose = letter => {
     if (locked) return;
     const isCorrect = letter === step['Correct Option'];
-    setSelected(letter); setLocked(true);
     const nextAnswers = { ...answers, [step['Step Number']]: {
       selected: letter, isCorrect, question: step.Question, correctOpt: step['Correct Option'], explanation: step.Explanation,
       options: { A:step['Option A'], B:step['Option B'], C:step['Option C'], D:step['Option D'] },
@@ -458,12 +577,24 @@ function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLab
     const attempted = Object.keys(nextAnswers).length;
     const correct   = Object.values(nextAnswers).filter(a=>a.isCorrect).length;
     onSave({ attempted, correct, incorrect: attempted-correct, completionPct: Math.round((attempted/total)*100), answers: nextAnswers });
+    onAnswer?.({
+      moduleId: module['Module ID'], subject: module.Subject, topic: module.Title,
+      questionNumber: step['Step Number'], answerGiven: step[`Option ${letter}`] || letter,
+      correctAnswer: step[`Option ${step['Correct Option']}`] || step['Correct Option'], isCorrect,
+    });
   };
 
-  const goNext = () => {
-    if (idx + 1 < total) { setIdx(idx+1); setSelected(null); setLocked(false); }
-    else { onSave({ completedAt:new Date().toISOString(), completionPct:100 }); setView('complete'); }
-  };
+  // Forward to the next question, or finish if this was the last one.
+  // Jumping forward never skips an unanswered question — Next is disabled
+  // until the current one is locked (see the button below), so by the time
+  // this runs idx+1 is always either already-answered (revisited) or fresh.
+  const goNext = () => { if (idx + 1 < total) setIdx(idx+1); else finish(); };
+
+  // Step back to review or re-see a previous question. Always allowed —
+  // reviewing past answers doesn't affect completion.
+  const goPrev = () => { if (idx > 0) setIdx(idx-1); };
+
+  const finish = () => { onSave({ completedAt:new Date().toISOString(), completionPct:100 }); setView('complete'); };
 
   // ── INTRO ──
   if (view === 'intro') {
@@ -555,12 +686,25 @@ function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLab
 
   // ── LESSON (teach a fact, then ask about it) ──
   const opts = ['A','B','C','D'];
+  const answeredCount = Object.keys(answers).length;
   return (
     <div className="content">
       <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
       <div className="card">
         <div className="lp-step-lbl">Step {idx+1} of {total} · {step['Learning Section'] || module.Title}</div>
-        <div className="lp-bar-outer"><div className="lp-bar-fill" style={{width:`${((locked?idx+1:idx)/total)*100}%`}} /></div>
+        {/* Progress reflects questions actually answered, not just how far idx has
+            moved — important now that Previous/Next can move idx around freely
+            without that meaning more questions were answered. */}
+        <div className="lp-bar-outer"><div className="lp-bar-fill" style={{width:`${(answeredCount/total)*100}%`}} /></div>
+        <div className="lp-dots">
+          {steps.map((s,i) => {
+            const a = answers[s['Step Number']];
+            let cls = 'lp-dot';
+            if (i === idx) cls += ' current';
+            else if (a) cls += a.isCorrect ? ' correct' : ' incorrect';
+            return <button key={s['Step Number']} className={cls} onClick={()=>setIdx(i)} aria-label={`Question ${i+1}${a?(a.isCorrect?', answered correctly':', answered incorrectly'):', not yet answered'}`} />;
+          })}
+        </div>
         <div className="lp-teach"><i className="fa-solid fa-lightbulb" /><p>{step.Teaching}</p></div>
         <div className="lp-q">{step.Question}</div>
         <div className="lp-opts">
@@ -588,10 +732,17 @@ function LearningModulePlayer({ module, steps, progress, onSave, onExit, backLab
             )}
           </div>
         )}
-        <div style={{textAlign:'right'}}>
-          <button className="btn-t" onClick={goNext} disabled={!locked} style={!locked?{opacity:.4,cursor:'not-allowed'}:{}}>
-            {idx+1 < total ? <>Next Question <i className="fa-solid fa-arrow-right" /></> : <>Finish Topic <i className="fa-solid fa-flag-checkered" /></>}
+        <div className="lp-nav-row">
+          <button className="btn-outline" onClick={goPrev} disabled={idx===0} style={idx===0?{opacity:.4,cursor:'not-allowed'}:{}}>
+            <i className="fa-solid fa-arrow-left" /> Previous
           </button>
+          {answeredCount >= total ? (
+            <button className="btn-t" onClick={finish}>Finish Topic <i className="fa-solid fa-flag-checkered" /></button>
+          ) : (
+            <button className="btn-t" onClick={goNext} disabled={!locked} style={!locked?{opacity:.4,cursor:'not-allowed'}:{}}>
+              {idx+1 < total ? <>Next Question <i className="fa-solid fa-arrow-right" /></> : <>Answer to Continue <i className="fa-solid fa-arrow-right" /></>}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -612,10 +763,13 @@ export default function Portal() {
   const [uploadName,  setUploadName]  = useState('');
   const [uploadDone,  setUploadDone]  = useState(false);
   const [profileEdit, setProfileEdit] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notifs,      setNotifs]      = useState(FALLBACK.notifications.filter(n=>isRowActive(n.Active)));
   const [activeModuleId, setActiveModuleId] = useState(null);
   const [activeAssignmentSubject, setActiveAssignmentSubject] = useState(null);
   const [learnProgress,  setLearnProgress]  = useState({});
+  const [leaderboard,    setLeaderboard]    = useState({ overall:[], bySubject:{} });
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
 
   const subjectRef = useRef(null);
   const attendRef  = useRef(null);
@@ -667,9 +821,6 @@ export default function Portal() {
   // ── Helpers ───────────────────────────────────────────────────────────────────
   const S          = cfg.settings;
   const NAV        = cfg.navigation.filter(t => isRowActive(t.Active));
-  const statCards  = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && ['attendance_pct','submissions_pct','avg_score','pending_tasks'].includes(s['Metric Key']));
-  const ratioStats = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && s['Metric Key'].startsWith('ratio_'));
-  const SUBJ       = cfg.subjects.filter(s => isRowActive(s.Active));
   const AMON       = cfg.attMonthly;
   const ASTAT      = cfg.attStats;
   const ASGN       = cfg.assignments.filter(a => isRowActive(a.Active));
@@ -689,6 +840,47 @@ export default function Portal() {
     const completed = topics.filter(m => learnProgress[m['Module ID']]?.completedAt).length;
     return { total: topics.length, completed };
   };
+
+  // ── Real Student Progress Dashboard (Req #5): every number below is derived
+  // live from learnProgress (per-module attempt/correct/completedAt state,
+  // synced to the StudentProgress sheet via recordAnswer) — nothing here is
+  // hardcoded sample data. A subject with no topics configured yet, or one the
+  // student hasn't touched, still renders correctly at 0/0.
+  const SUBJ = ASGN_SUBJ.map(subj => {
+    const topics = topicsForSubject(subj.Subject);
+    const topicProgress = topics.map(m => learnProgress[m['Module ID']]);
+    const topicsDone   = topicProgress.filter(p => p?.completedAt).length;
+    const attempted    = topicProgress.reduce((sum,p) => sum + (p?.attempted || 0), 0);
+    const correct      = topicProgress.reduce((sum,p) => sum + (p?.correct   || 0), 0);
+    const incorrect    = topicProgress.reduce((sum,p) => sum + (p?.incorrect || 0), 0);
+    const lastAttempt  = topicProgress.reduce((latest,p) => {
+      const ts = p?.completedAt || p?.startedAt;
+      return ts && (!latest || ts > latest) ? ts : latest;
+    }, null);
+    return {
+      Subject: subj.Subject,
+      'Color (Hex)': subj['Color (Hex)'] || '#00c6a7',
+      'Total Topics': topics.length,
+      'Topics Done': topicsDone,
+      'Progress %': topics.length ? Math.round((topicsDone/topics.length)*100) : 0,
+      QuestionsAttempted: attempted,
+      QuestionsCorrect: correct,
+      QuestionsIncorrect: incorrect,
+      LastAttemptDate: lastAttempt ? new Date(lastAttempt).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}) : '—',
+    };
+  });
+
+  // Achievements + overall quiz accuracy, both computed live from real
+  // learnProgress data — see computeAchievements() above for the full badge
+  // logic. liveQuizAvg backs the 'avg_score' stat card and 'ratio_quiz_avg'
+  // donut slice with a real number instead of the sample 65/78 placeholders.
+  const achievements = computeAchievements(SUBJ, learnProgress);
+  const liveQuizAvg = achievements.totalAttempted ? achievements.accuracy : null;
+
+  const statCards  = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && ['attendance_pct','submissions_pct','avg_score','pending_tasks'].includes(s['Metric Key']))
+    .map(s => s['Metric Key']==='avg_score' && liveQuizAvg!==null ? { ...s, Value:String(liveQuizAvg) } : s);
+  const ratioStats = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && s['Metric Key'].startsWith('ratio_'))
+    .map(s => s['Metric Key']==='ratio_quiz_avg' && liveQuizAvg!==null ? { ...s, Value:String(liveQuizAvg) } : s);
   const nextN      = parseInt(S.DashboardNextClasses, 10) || 3;
   const unreadCount = notifs.filter(n => n.Unread).length;
   const attColor   = p => p >= 95 ? (S.AttHighColor||'#4ade80') : p >= 85 ? (S.AttMidColor||'#00c6a7') : (S.AttLowColor||'#f5a623');
@@ -752,38 +944,101 @@ export default function Portal() {
   };
 
   const handleLogout = () => {
-    destroyCharts(); setAuthed(false); setTab('dashboard');
+    destroyCharts(); setAuthed(false); setTab('dashboard'); setMobileNavOpen(false);
     setProfile({ name:'', id:'', classLevel: S.DefaultClassLevel||'Class 3' });
     setLoginErr('');
   };
 
   // ── Interactive Learning: per-student progress ───────────────────────────────
-  // Persisted to localStorage (so it survives a refresh) and best-effort synced
-  // to a backend if one exists — see the note above the Assignments tab JSX for
-  // what to build server-side to make this durable across devices.
+  // Persisted to localStorage (so it survives a refresh, and renders instantly
+  // on login) AND synced to the StudentProgress Google Sheet via recordAnswer()
+  // on every answered question. On login we also pull the sheet's raw history
+  // back and rebuild any module's summary from it — this is what lets a
+  // student see their real progress on a brand-new device, not just the one
+  // that originally answered the questions.
   useEffect(() => {
     if (!profile.id) { setLearnProgress({}); return; }
+    let local = {};
     try {
       const raw = localStorage.getItem(`learnProgress:${profile.id}`);
-      setLearnProgress(raw ? JSON.parse(raw) : {});
-    } catch { setLearnProgress({}); }
-  }, [profile.id]);
+      local = raw ? JSON.parse(raw) : {};
+    } catch { local = {}; }
+    setLearnProgress(local);
+
+    // Wait for real sheet config (step counts) to be loaded before rebuilding
+    // completion state from raw rows — otherwise a not-yet-loaded LMOD/steps
+    // would make every module look 0% complete even if finished.
+    if (!cfgReady) return;
+
+    fetch(`/api/student/progress-history?studentId=${encodeURIComponent(profile.id)}`)
+      .then(r => r.json())
+      .then(({ progress }) => {
+        if (!Array.isArray(progress) || !progress.length) return;
+        const rebuilt = rebuildLearnProgressFromRows(progress, moduleId => stepsFor(moduleId).length);
+        setLearnProgress(prev => {
+          const merged = { ...rebuilt };
+          // Local always wins per-module if it has at least as many attempts
+          // as the sheet rebuild — covers the case where the student just
+          // answered something on this device and the sheet write hasn't
+          // round-tripped back through the cache yet.
+          Object.keys(prev).forEach(moduleId => {
+            const localAttempted = prev[moduleId]?.attempted || 0;
+            const rebuiltAttempted = merged[moduleId]?.attempted || 0;
+            if (localAttempted >= rebuiltAttempted) merged[moduleId] = prev[moduleId];
+          });
+          try { localStorage.setItem(`learnProgress:${profile.id}`, JSON.stringify(merged)); } catch {}
+          return merged;
+        });
+      })
+      .catch(() => {}); // offline or sheet unreachable — localStorage already rendered above
+  }, [profile.id, cfgReady]);
 
   const saveLearnProgress = useCallback((moduleId, patch) => {
     setLearnProgress(prev => {
       const merged = { ...(prev[moduleId]||{}), ...patch };
       const next = { ...prev, [moduleId]: merged };
       try { localStorage.setItem(`learnProgress:${profile.id}`, JSON.stringify(next)); } catch {}
-      fetch('/api/student/progress', {
-        method: 'POST', headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ studentId: profile.id, moduleId, ...merged }),
-      }).catch(() => {}); // no backend yet? fine — localStorage already has it.
+      // Cross-device sync of per-question events happens via recordAnswer()
+      // below (one row per answered question, matching the StudentProgress
+      // sheet schema) — this function only owns the local/per-module summary
+      // used to render module cards, the dashboard, etc.
       return next;
     });
   }, [profile.id]);
 
+  // ── Student Progress Tracking: one row per answered question, sent to the
+  // StudentProgress Google Sheet via /api/student/progress. Best-effort —
+  // if the network call fails, the student's local progress (above) is
+  // already saved, so nothing is lost; it just won't show up in the
+  // dashboard/leaderboard on another device until the next successful sync.
+  const recordAnswer = useCallback(({ moduleId, subject, topic, questionNumber, answerGiven, correctAnswer, isCorrect }) => {
+    fetch('/api/student/progress', {
+      method: 'POST', headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({
+        studentId: profile.id, studentName: profile.name, subject, topic, moduleId,
+        questionNumber, answerGiven, correctAnswer, status: isCorrect ? 'Correct' : 'Incorrect',
+      }),
+    }).catch(() => {});
+  }, [profile.id, profile.name]);
+
   // Leaving the Assignments tab always returns to Subject selection (Step 1) next time it's opened.
   useEffect(() => { if (tab !== 'assignments') { setActiveModuleId(null); setActiveAssignmentSubject(null); } }, [tab]);
+  // Selecting any nav item closes the mobile drawer (desktop sidebar is unaffected — see CSS).
+  useEffect(() => { setMobileNavOpen(false); }, [tab]);
+
+  // Leaderboard data is fetched lazily — only once the student actually opens
+  // the tab — since most logins won't touch it, and it's a cross-student
+  // aggregate (not specific to this student) so there's no reason to block
+  // login or the dashboard on it.
+  useEffect(() => {
+    if (tab !== 'leaderboard' || !authed) return;
+    setLeaderboardLoading(true);
+    fetch('/api/student/leaderboard')
+      .then(r => r.json())
+      .then(data => setLeaderboard({ overall: data.overall||[], bySubject: data.bySubject||{} }))
+      .catch(() => {})
+      .finally(() => setLeaderboardLoading(false));
+  }, [tab, authed]);
 
   const notifStyle = type => ({
     bg: type==='assignment'?'rgba(59,130,246,.15)':type==='result'?'rgba(34,197,94,.15)':type==='reminder'?'rgba(245,166,35,.15)':type==='schedule'?'rgba(239,68,68,.15)':'rgba(168,85,247,.15)',
@@ -837,6 +1092,15 @@ export default function Portal() {
     .lo-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:transparent;color:rgba(255,255,255,.4);font-family:var(--fb);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:all .2s;}
     .lo-btn:hover{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3);color:#f87171;}
     .main{flex:1;overflow-y:auto;background:var(--navy);}
+    /* Mobile hamburger trigger — hidden on desktop, shown only under the 640px breakpoint below */
+    .mnav-toggle{display:none;align-items:center;justify-content:center;width:38px;height:38px;flex-shrink:0;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:#fff;font-size:16px;cursor:pointer;}
+    .mnav-toggle:hover{background:rgba(255,255,255,.08);}
+    .mnav-bar{display:none;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--navy);z-index:50;}
+    .mnav-bar-title{font-family:var(--fd);font-size:15px;font-weight:800;color:#fff;}
+    .mnav-close{display:none;align-items:center;justify-content:center;width:30px;height:30px;flex-shrink:0;border-radius:8px;border:none;background:rgba(255,255,255,.06);color:rgba(255,255,255,.6);font-size:14px;cursor:pointer;}
+    .mnav-close:hover{background:rgba(255,255,255,.12);color:#fff;}
+    /* Tap-outside backdrop behind the drawer — only rendered/active on mobile while open */
+    .mnav-backdrop{display:none;}
     .main-top{padding:28px 32px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
     .pg-h{font-family:var(--fd);font-size:24px;font-weight:900;color:#fff;}
     .pg-s{font-size:13px;color:var(--muted);margin-top:3px;}
@@ -856,6 +1120,36 @@ export default function Portal() {
     .sp-meta{font-size:12px;color:var(--muted);}
     .sp-bar{height:8px;background:rgba(255,255,255,.06);border-radius:100px;overflow:hidden;}
     .sp-fill{height:100%;border-radius:100px;transition:width .8s ease;}
+    .sp-detail-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:9px;font-size:11.5px;color:var(--muted);}
+    .sp-detail-row i{margin-right:4px;}
+    .ana-stats-g{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;}
+    .ana-stat{text-align:center;padding:14px 8px;background:var(--surf2);border-radius:11px;}
+    .ana-stat-v{font-family:var(--fd);font-size:22px;font-weight:900;color:#fff;line-height:1;margin-bottom:5px;}
+    .ana-stat-l{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
+    .badge-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;}
+    .badge-card{background:var(--surf2);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center;}
+    .badge-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:19px;margin:0 auto 10px;}
+    .badge-label{font-size:13px;font-weight:700;color:#fff;margin-bottom:4px;}
+    .badge-detail{font-size:11px;color:var(--muted);line-height:1.5;}
+    /* ── Leaderboard ──────────────────────────────────────────────────── */
+    .lb-list{display:flex;flex-direction:column;gap:8px;}
+    .lb-row{display:flex;align-items:center;gap:14px;padding:11px 14px;border-radius:11px;background:var(--surf2);border:1px solid transparent;transition:all .15s;}
+    .lb-row.me{border-color:rgba(0,198,167,.4);background:rgba(0,198,167,.08);}
+    .lb-rank{width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:rgba(255,255,255,.6);flex-shrink:0;}
+    .lb-rank.top1{background:rgba(245,166,35,.18);color:#f5a623;}
+    .lb-rank.top2{background:rgba(203,213,225,.18);color:#cbd5e1;}
+    .lb-rank.top3{background:rgba(217,119,6,.18);color:#d97706;}
+    .lb-name{flex:1;font-size:13.5px;font-weight:700;color:#fff;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .lb-you{color:var(--teal);font-weight:800;}
+    .lb-stats{display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-shrink:0;}
+    .lb-correct{font-weight:700;color:rgba(255,255,255,.75);}
+    .lb-acc{color:var(--teal);font-weight:700;}
+    .lb-subj-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;}
+    .lb-subj-card{padding:20px;}
+    .lb-champ-name{font-family:var(--fd);font-size:17px;font-weight:900;color:#fff;margin-top:4px;}
+    .lb-champ-stats{font-size:12px;color:var(--muted);margin-top:3px;margin-bottom:12px;}
+    .lb-runner-ups{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:6px;}
+    .lb-runner-row{display:flex;justify-content:space-between;font-size:11.5px;color:rgba(255,255,255,.6);}
     .att-g{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:22px;}
     .att-c{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:18px;text-align:center;}
     .att-n{font-family:var(--fd);font-size:28px;font-weight:900;line-height:1;margin-bottom:5px;}
@@ -906,8 +1200,27 @@ export default function Portal() {
     .wbanner h2{font-family:var(--fd);font-size:20px;font-weight:900;color:#fff;margin-bottom:4px;}
     .wbanner p{font-size:13px;color:rgba(255,255,255,.6);}
     .av-big{width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,var(--teal),#0099cc);display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;flex-shrink:0;}
-    @media(max-width:900px){.sr{grid-template-columns:repeat(2,1fr);}.cr{grid-template-columns:1fr;}.att-g{grid-template-columns:1fr 1fr;}.prof-g{grid-template-columns:1fr;}}
-    @media(max-width:640px){.sb{width:0;overflow:hidden;}.main-top{padding:16px;}.content{padding:16px;}.sr{grid-template-columns:1fr 1fr;}}
+    @media(max-width:900px){.sr{grid-template-columns:repeat(2,1fr);}.cr{grid-template-columns:1fr;}.att-g{grid-template-columns:1fr 1fr;}.prof-g{grid-template-columns:1fr;}.ana-stats-g{grid-template-columns:repeat(3,1fr);}}
+    @media(max-width:640px){
+      /* Sidebar becomes a fixed off-canvas drawer instead of vanishing — width:0
+         previously removed all navigation on mobile with no way to reopen it. */
+      .sb{position:fixed;top:0;left:0;bottom:0;width:80vw;max-width:300px;z-index:300;
+        transform:translateX(-100%);transition:transform .25s ease;box-shadow:0 0 40px rgba(0,0,0,.4);}
+      .sb.open{transform:translateX(0);}
+      .mnav-toggle{display:flex;}
+      .mnav-bar{display:flex;}
+      .mnav-close{display:flex;}
+      .mnav-backdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:290;opacity:0;pointer-events:none;transition:opacity .2s ease;}
+      .mnav-backdrop.open{opacity:1;pointer-events:auto;}
+      .main-top{padding:14px 16px;gap:12px;}
+      .content{padding:16px;}
+      .sr{grid-template-columns:1fr 1fr;}
+      .ana-stats-g{grid-template-columns:repeat(2,1fr);}
+      .badge-grid{grid-template-columns:1fr 1fr;}
+      .lb-row{flex-wrap:wrap;}
+      .lb-stats{width:100%;justify-content:flex-start;margin-left:44px;}
+      .lb-subj-grid{grid-template-columns:1fr;}
+    }
     /* ── Interactive Learning ─────────────────────────────────────────── */
     .sec-divider{display:flex;align-items:center;gap:9px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:30px 0 16px;}
     .sec-divider::after{content:'';flex:1;height:1px;background:var(--border);}
@@ -952,6 +1265,13 @@ export default function Portal() {
     .lp-step-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;}
     .lp-bar-outer{width:100%;height:8px;background:rgba(255,255,255,.07);border-radius:100px;overflow:hidden;margin-bottom:20px;}
     .lp-bar-fill{height:100%;border-radius:100px;background:var(--teal);transition:width .4s ease;}
+    .lp-dots{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:22px;}
+    .lp-dot{width:11px;height:11px;border-radius:50%;border:none;padding:0;cursor:pointer;background:rgba(255,255,255,.12);transition:all .15s;flex-shrink:0;}
+    .lp-dot:hover{background:rgba(255,255,255,.25);}
+    .lp-dot.current{width:13px;height:13px;background:var(--teal);box-shadow:0 0 0 3px rgba(0,198,167,.22);}
+    .lp-dot.correct{background:#22c55e;}
+    .lp-dot.incorrect{background:#ef4444;}
+    .lp-nav-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;}
     .lp-teach{background:rgba(0,198,167,.07);border:1px solid rgba(0,198,167,.18);border-radius:12px;padding:16px 18px;margin-bottom:20px;display:flex;gap:12px;align-items:flex-start;}
     .lp-teach i{color:var(--teal);font-size:16px;margin-top:2px;}
     .lp-teach p{font-size:14px;color:#fff;line-height:1.65;}
@@ -988,7 +1308,7 @@ export default function Portal() {
     .lp-mistake-q{font-size:13.5px;font-weight:700;color:#fff;margin-bottom:6px;}
     .lp-mistake-row{font-size:12.5px;color:rgba(255,255,255,.6);margin-bottom:3px;}
     .lp-actions{display:flex;gap:12px;justify-content:center;margin-top:24px;flex-wrap:wrap;}
-    @media(max-width:640px){.lm-grid{grid-template-columns:1fr;}.asgn-subj-grid{grid-template-columns:1fr;}.lp-opts{grid-template-columns:1fr;}.lp-hero{padding:28px 18px;}}
+    @media(max-width:640px){.lm-grid{grid-template-columns:1fr;}.asgn-subj-grid{grid-template-columns:1fr;}.lp-opts{grid-template-columns:1fr;}.lp-hero{padding:28px 18px;}.lp-nav-row{flex-wrap:wrap;}.lp-nav-row button{flex:1;justify-content:center;min-width:130px;}}
   `;
 
   const mergedProfile = [
@@ -1033,11 +1353,15 @@ export default function Portal() {
       ) : (
         <div className="dash">
 
+          {/* Tap-outside backdrop — mobile only (hidden via CSS on desktop) */}
+          <div className={`mnav-backdrop${mobileNavOpen?' open':''}`} onClick={()=>setMobileNavOpen(false)} />
+
           {/* SIDEBAR */}
-          <aside className="sb">
+          <aside className={`sb${mobileNavOpen?' open':''}`}>
             <div className="sb-head">
               <div className="sb-av"><i className="fa-solid fa-user-graduate" /></div>
-              <div><div className="sb-name">{profile.name}</div><div className="sb-id">{profile.id}</div></div>
+              <div style={{flex:1,minWidth:0}}><div className="sb-name">{profile.name}</div><div className="sb-id">{profile.id}</div></div>
+              <button className="mnav-close" onClick={()=>setMobileNavOpen(false)} aria-label="Close navigation menu"><i className="fa-solid fa-xmark" /></button>
             </div>
             <p className="sb-sec">{S.SidebarSectionLabel}</p>
             <nav className="sb-nav">
@@ -1055,6 +1379,15 @@ export default function Portal() {
 
           {/* MAIN */}
           <main className="main">
+
+            {/* Mobile-only top bar: hamburger to open the drawer. Hidden on
+                desktop via CSS (.mnav-toggle has display:none until 640px). */}
+            <div className="mnav-bar">
+              <button className="mnav-toggle" onClick={()=>setMobileNavOpen(true)} aria-label="Open navigation menu">
+                <i className="fa-solid fa-bars" />
+              </button>
+              <span className="mnav-bar-title">{S.SiteName}</span>
+            </div>
 
             {/* DASHBOARD */}
             {tab==='dashboard' && (<>
@@ -1077,6 +1410,31 @@ export default function Portal() {
                 <div className="cr">
                   <div className="card"><div className="card-t"><i className="fa-solid fa-chart-bar" /> Subject Progress</div><div className="cv"><canvas id="subjectChart" /></div></div>
                   <div className="card"><div className="card-t"><i className="fa-solid fa-circle-half-stroke" /> Performance Ratios</div><div className="cv"><canvas id="ratioChart" /></div></div>
+                </div>
+                <div className="card" style={{marginBottom:'22px'}}>
+                  <div className="card-t"><i className="fa-solid fa-chart-simple" /> Learning Analytics</div>
+                  <div className="ana-stats-g">
+                    <div className="ana-stat"><div className="ana-stat-v">{achievements.totalAttempted}</div><div className="ana-stat-l">Questions Attempted</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#4ade80'}}>{achievements.totalCorrect}</div><div className="ana-stat-l">Correct Answers</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#f87171'}}>{achievements.totalAttempted-achievements.totalCorrect}</div><div className="ana-stat-l">Incorrect Answers</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'var(--teal)'}}>{achievements.accuracy}%</div><div className="ana-stat-l">Overall Accuracy</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v">{SUBJ.filter(s=>s['Topics Done']>0).length}</div><div className="ana-stat-l">Subjects Started</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v">{achievements.completedCount}</div><div className="ana-stat-l">Topics Completed</div></div>
+                  </div>
+                  <div className="sec-divider" style={{marginTop:'22px'}}>Achievements</div>
+                  {achievements.badges.length ? (
+                    <div className="badge-grid">
+                      {achievements.badges.map(b=>(
+                        <div key={b.id} className="badge-card">
+                          <div className="badge-icon" style={{background:`${b.color}22`,color:b.color}}><i className={`fa-solid ${b.icon}`} /></div>
+                          <div className="badge-label">{b.label}</div>
+                          <div className="badge-detail">{b.detail}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'14px 0'}}>Complete a few topics to start earning achievements!</div>
+                  )}
                 </div>
                 <div className="card">
                   <div className="card-t"><i className="fa-solid fa-clock" /> Next {nextN} Classes</div>
@@ -1101,16 +1459,88 @@ export default function Portal() {
                 </div>
                 <div className="card">
                   <div className="card-t"><i className="fa-solid fa-list-check" /> Detailed Progress</div>
-                  {SUBJ.map(s=>(
+                  {!SUBJ.length ? (
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>No subjects configured yet — check back once your teacher adds one!</div>
+                  ) : SUBJ.map(s=>(
                     <div key={s.Subject} className="sp-item">
                       <div className="sp-hd">
                         <span className="sp-name">{s.Subject}</span>
                         <span className="sp-meta">{s['Topics Done']} / {s['Total Topics']} topics · <span style={{color:s['Color (Hex)'],fontWeight:700}}>{s['Progress %']}%</span></span>
                       </div>
                       <div className="sp-bar"><div className="sp-fill" style={{width:`${s['Progress %']}%`,background:s['Color (Hex)']}} /></div>
+                      <div className="sp-detail-row">
+                        <span><i className="fa-solid fa-circle-check" style={{color:'#4ade80'}} /> {s.QuestionsCorrect} correct</span>
+                        <span><i className="fa-solid fa-circle-xmark" style={{color:'#f87171'}} /> {s.QuestionsIncorrect} incorrect</span>
+                        <span><i className="fa-solid fa-list-ol" /> {s.QuestionsAttempted} attempted</span>
+                        <span><i className="fa-solid fa-calendar" /> Last attempt: {s.LastAttemptDate}</span>
+                      </div>
                     </div>
                   ))}
                 </div>
+              </div>
+            </>)}
+
+            {/* LEADERBOARD */}
+            {tab==='leaderboard' && (<>
+              <div className="main-top"><div><div className="pg-h">Leaderboard</div><div className="pg-s">See how you stack up against other students.</div></div></div>
+              <div className="content">
+                <div className="card" style={{marginBottom:'22px'}}>
+                  <div className="card-t"><i className="fa-solid fa-trophy" /> Overall Ranking</div>
+                  {leaderboardLoading ? (
+                    <>{[1,2,3].map(i=><div key={i} style={{marginBottom:'10px'}}><SK h="44px" /></div>)}</>
+                  ) : !leaderboard.overall.length ? (
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>No leaderboard data yet — be the first to answer some questions!</div>
+                  ) : (
+                    <div className="lb-list">
+                      {leaderboard.overall.slice(0,20).map((row,i)=>{
+                        const rank = i+1;
+                        const isMe = row.studentId === profile.id;
+                        return (
+                          <div key={row.studentId} className={`lb-row${isMe?' me':''}`}>
+                            <div className={`lb-rank${rank<=3?` top${rank}`:''}`}>{rank<=3 ? <i className="fa-solid fa-trophy" /> : rank}</div>
+                            <div className="lb-name">{row.studentName}{isMe && <span className="lb-you"> (You)</span>}</div>
+                            <div className="lb-stats"><span className="lb-correct">{row.correct} correct</span><span className="lb-acc">{row.accuracy}% accuracy</span></div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="sec-divider" style={{marginTop:0}}>Subject-Wise Champions</div>
+                {leaderboardLoading ? (
+                  <div className="card"><SK h="80px" /></div>
+                ) : !Object.keys(leaderboard.bySubject).length ? (
+                  <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>No subject rankings yet.</div>
+                ) : (
+                  <div className="lb-subj-grid">
+                    {Object.entries(leaderboard.bySubject).map(([subject, rows]) => {
+                      const champ = rows[0];
+                      const subjMeta = ASGN_SUBJ.find(s=>s.Subject===subject);
+                      return (
+                        <div key={subject} className="card lb-subj-card">
+                          <div className="card-t"><i className={`fa-solid ${subjMeta?.['Icon (FontAwesome solid)']||'fa-medal'}`} style={{color:subjMeta?.['Color (Hex)']}} /> {subject} Champion</div>
+                          {champ ? (
+                            <>
+                              <div className="lb-champ-name">{champ.studentName}</div>
+                              <div className="lb-champ-stats">{champ.correct} correct · {champ.accuracy}% accuracy</div>
+                              {rows.length>1 && (
+                                <div className="lb-runner-ups">
+                                  {rows.slice(1,4).map((r,i)=>(
+                                    <div key={r.studentId} className="lb-runner-row">
+                                      <span>{i+2}. {r.studentName}{r.studentId===profile.id?' (You)':''}</span>
+                                      <span>{r.correct} correct</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          ) : <div style={{color:'var(--muted)',fontSize:'13px'}}>No attempts yet.</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </>)}
 
@@ -1232,6 +1662,7 @@ export default function Portal() {
                   steps={stepsFor(activeModuleId)}
                   progress={learnProgress[activeModuleId]}
                   onSave={patch=>saveLearnProgress(activeModuleId, patch)}
+                  onAnswer={recordAnswer}
                   onExit={()=>setActiveModuleId(null)}
                   backLabel={`Back to ${activeAssignmentSubject} Topics`}
                 />
