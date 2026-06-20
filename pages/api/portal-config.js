@@ -23,6 +23,7 @@ const SHEETS = {
     'Social Studies':    '1H4tLGOZBXWNeQbXAtlCtSktMvzwcEdwmiEvQpyD9xqs',
     'General Knowledge': '1AcPo8DPmZYJeno3kYTgvPO2sS8GcEQJX6guDLJ3qfWA',
     'Artificial Intelegence': '1GL0oIaFc3TnyTrMIZmqpWTBrYfb-Me8k5X8WwZKCE2I',
+    'Basic Danish': '1cVbB-AE7zwCwARRpln0VBzd3VINjtHnrG2Zf3kIm8Sw',
 
   },
 };
