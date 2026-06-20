@@ -87,6 +87,11 @@ const FALLBACK = {
 
 export default function Home() {
   const [cms, setCms] = useState(FALLBACK);
+  // Public-site mobile nav: the hamburger button existed in markup already
+  // but had no handler and no menu to open — .nav-links simply vanishes
+  // below 900px with no way to reach Classes/Subjects/Schedule/etc. on a
+  // phone. Same off-canvas-drawer fix as the Student Portal's sidebar.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   // ── Fetch live data from Google Sheet via /api/content ──────────────────
   useEffect(() => {
@@ -112,6 +117,20 @@ export default function Home() {
         });
       })
       .catch(err => console.warn('[cms] Fetch error, using fallback:', err.message));
+  }, []);
+
+  // ── Portal Dashboard (Req #8): live aggregate stats from /api/portal-stats,
+  // a separate public endpoint backed by the same Apps Script as the student
+  // portal's progress/leaderboard data. Starts null so the section can render
+  // a loading skeleton instead of flashing zeroes before the real numbers
+  // arrive — these are real counts, not content a hardcoded fallback can
+  // meaningfully approximate.
+  const [portalStats, setPortalStats] = useState(null);
+  useEffect(() => {
+    fetch('/api/portal-stats')
+      .then(r => r.json())
+      .then(data => setPortalStats(data))
+      .catch(err => { console.warn('[portal-stats] Fetch error:', err.message); setPortalStats(false); });
   }, []);
 
   const [formStatus, setFormStatus] = useState({ state: 'idle', studentId: '', username: '', tempPassword: '' });
@@ -206,6 +225,20 @@ export default function Home() {
           .n-cta:hover{background:var(--accent-light);transform:translateY(-1px);}
           .hm{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:8px;}
           @media(max-width:900px){.nav-links{display:none;}.hm{display:block;}}
+          .mnav-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:290;opacity:0;pointer-events:none;transition:opacity .2s ease;}
+          .mnav-drawer{display:none;position:fixed;top:0;right:0;bottom:0;width:80vw;max-width:320px;background:var(--navy);z-index:300;
+            transform:translateX(100%);transition:transform .25s ease;box-shadow:0 0 40px rgba(0,0,0,.4);flex-direction:column;overflow-y:auto;}
+          .mnav-drawer.open{transform:translateX(0);}
+          .mnav-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid rgba(255,255,255,.08);}
+          .mnav-drawer-close{background:rgba(255,255,255,.06);border:none;color:rgba(255,255,255,.7);width:32px;height:32px;border-radius:9px;cursor:pointer;font-size:14px;}
+          .mnav-drawer-close:hover{background:rgba(255,255,255,.12);color:#fff;}
+          .mnav-drawer-links{display:flex;flex-direction:column;gap:4px;padding:16px 20px;}
+          .mnav-drawer-links .nl{padding:12px 14px;font-size:14px;}
+          @media(max-width:900px){
+            .mnav-drawer{display:flex;}
+            .mnav-backdrop{display:block;}
+            .mnav-backdrop.open{opacity:1;pointer-events:auto;}
+          }
 
           /* HERO */
           .hero{background:var(--navy);min-height:90vh;display:flex;align-items:center;position:relative;overflow:hidden;}
@@ -253,6 +286,37 @@ export default function Home() {
           .why-c h3{font-size:17px;font-weight:700;margin-bottom:9px;color:var(--navy);}
           .why-c p{font-size:13px;color:var(--muted);line-height:1.7;}
           @media(max-width:720px){.why-g{grid-template-columns:1fr;}}
+
+          /* PORTAL DASHBOARD */
+          .pd-stats-g{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:52px;}
+          .pd-stat-c{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:var(--radius);padding:24px;text-align:center;transition:all .3s;}
+          .pd-stat-c:hover{transform:translateY(-3px);background:rgba(255,255,255,.07);}
+          .pd-stat-ic{width:42px;height:42px;border-radius:12px;background:rgba(0,198,167,.12);color:var(--teal);display:flex;align-items:center;justify-content:center;font-size:17px;margin:0 auto 14px;}
+          .pd-stat-v{font-family:var(--font-d);font-size:30px;font-weight:900;color:#fff;line-height:1;margin-bottom:6px;}
+          .pd-stat-l{font-size:11px;color:rgba(255,255,255,.45);font-weight:600;text-transform:uppercase;letter-spacing:.06em;}
+          .pd-skel{display:inline-block;width:50px;height:24px;border-radius:6px;background:rgba(255,255,255,.08);animation:pdpulse 1.4s ease-in-out infinite;}
+          @keyframes pdpulse{0%,100%{opacity:1}50%{opacity:.35}}
+          .pd-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:40px;}
+          .pd-sub-h{font-size:13px;font-weight:700;color:#fff;margin-bottom:16px;display:flex;align-items:center;gap:8px;}
+          .pd-sub-h i{color:var(--accent);}
+          .pd-champ-list,.pd-activity-list{display:flex;flex-direction:column;gap:10px;}
+          .pd-champ-c{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:16px 18px;display:flex;align-items:center;gap:14px;}
+          .pd-champ-overall{border-color:rgba(245,166,35,.35);background:rgba(245,166,35,.06);}
+          .pd-champ-ic{width:40px;height:40px;border-radius:11px;background:rgba(245,166,35,.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+          .pd-champ-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.4);margin-bottom:3px;}
+          .pd-champ-name{font-size:14px;font-weight:800;color:#fff;}
+          .pd-champ-meta{font-size:11.5px;color:rgba(255,255,255,.5);margin-top:2px;}
+          .pd-activity-row{display:flex;align-items:flex-start;gap:11px;padding:11px 4px;border-bottom:1px solid rgba(255,255,255,.06);}
+          .pd-activity-row:last-child{border-bottom:none;}
+          .pd-activity-dot{width:7px;height:7px;border-radius:50%;background:var(--teal);margin-top:6px;flex-shrink:0;}
+          .pd-activity-text{font-size:13px;color:rgba(255,255,255,.7);line-height:1.6;}
+          .pd-activity-text strong{color:#fff;font-weight:700;}
+          .pd-activity-subj{color:rgba(255,255,255,.4);}
+          .pd-empty,.pd-error{text-align:center;color:rgba(255,255,255,.4);font-size:13px;padding:20px;background:rgba(255,255,255,.03);border-radius:12px;margin-top:30px;}
+          .pd-cta{margin-top:44px;padding-top:36px;border-top:1px solid rgba(255,255,255,.08);text-align:center;}
+          .pd-cta p{font-size:14px;color:rgba(255,255,255,.6);margin-bottom:16px;}
+          @media(max-width:900px){.pd-stats-g{grid-template-columns:1fr 1fr;}.pd-row{grid-template-columns:1fr;}}
+          @media(max-width:480px){.pd-stats-g{grid-template-columns:1fr;}}
 
           /* CLASSES */
           .cls-g{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:52px;}
@@ -373,6 +437,8 @@ export default function Home() {
           /* SUCCESS CARD */
           .success-card{background:rgba(0,198,167,.08);border:1px solid rgba(0,198,167,.25);border-radius:16px;padding:32px;margin-top:24px;}
           .cred-g{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0;}
+          .review-g{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;font-size:13px;color:rgba(255,255,255,.7);}
+          @media(max-width:480px){.review-g{grid-template-columns:1fr;}}
           .cred-box{background:rgba(255,255,255,.05);border-radius:10px;padding:14px;}
           .cred-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.4);margin-bottom:6px;}
           .cred-val{font-size:15px;font-weight:800;font-family:monospace;}
@@ -390,6 +456,8 @@ export default function Home() {
           /* FOOTER */
           .footer{background:#050913;color:rgba(255,255,255,.4);padding:60px 24px 28px;border-top:1px solid rgba(255,255,255,.06);}
           .footer-in{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:40px;margin-bottom:44px;}
+          .contact-g{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;margin-top:48px;}
+          @media(max-width:640px){.contact-g{grid-template-columns:1fr;}}
           .f-brand{font-family:var(--font-d);font-size:20px;font-weight:900;color:#fff;margin-bottom:10px;}
           .f-p{font-size:13px;line-height:1.8;}
           .f-h{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#fff;margin-bottom:14px;}
@@ -409,6 +477,7 @@ export default function Home() {
             <span className="logo-txt">ApexCBSE</span>
           </a>
           <div className="nav-links">
+            <a href="#dashboard" className="nl">Dashboard</a>
             <a href="#about"    className="nl">About</a>
             <a href="#classes"  className="nl">Classes</a>
             <a href="#subjects" className="nl">Subjects</a>
@@ -418,9 +487,29 @@ export default function Home() {
             <a href="/portal"   className="n-portal"><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> Student Login</a>
             <a href="#enroll"   className="n-cta">Enroll Now</a>
           </div>
-          <button className="hm"><i className="fa-solid fa-bars"></i></button>
+          <button className="hm" onClick={()=>setMobileNavOpen(true)} aria-label="Open menu"><i className="fa-solid fa-bars"></i></button>
         </div>
       </nav>
+
+      {/* Mobile nav drawer — only relevant/visible under the 900px breakpoint (see CSS) */}
+      <div className={`mnav-backdrop${mobileNavOpen?' open':''}`} onClick={()=>setMobileNavOpen(false)} />
+      <div className={`mnav-drawer${mobileNavOpen?' open':''}`}>
+        <div className="mnav-drawer-head">
+          <span className="logo-txt" style={{color:'#fff'}}>Menu</span>
+          <button className="mnav-drawer-close" onClick={()=>setMobileNavOpen(false)} aria-label="Close menu"><i className="fa-solid fa-xmark"></i></button>
+        </div>
+        <div className="mnav-drawer-links">
+          <a href="#dashboard" className="nl" onClick={()=>setMobileNavOpen(false)}>Dashboard</a>
+          <a href="#about"    className="nl" onClick={()=>setMobileNavOpen(false)}>About</a>
+          <a href="#classes"  className="nl" onClick={()=>setMobileNavOpen(false)}>Classes</a>
+          <a href="#subjects" className="nl" onClick={()=>setMobileNavOpen(false)}>Subjects</a>
+          <a href="#schedule" className="nl" onClick={()=>setMobileNavOpen(false)}>Schedule</a>
+          <a href="#fees"     className="nl" onClick={()=>setMobileNavOpen(false)}>Fees</a>
+          <a href="#contact"  className="nl" onClick={()=>setMobileNavOpen(false)}>Contact</a>
+          <a href="/portal"   className="n-portal" style={{marginTop:'10px',textAlign:'center'}}><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> Student Login</a>
+          <a href="#enroll"   className="n-cta" style={{textAlign:'center',marginTop:'8px'}} onClick={()=>setMobileNavOpen(false)}>Enroll Now</a>
+        </div>
+      </div>
 
       {/* ── HERO ── */}
       <section id="home" className="hero">
@@ -448,6 +537,96 @@ export default function Home() {
                 <div key={i} className="hfeat"><i className="fa-solid fa-check-circle"></i> {f}</div>
               ))}
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── PORTAL DASHBOARD (live stats from the Student Portal) ── */}
+      <section id="dashboard" className="sec sec-dark">
+        <div className="sec-in">
+          <p className="sec-lbl">Live From The Portal</p>
+          <h2 className="sec-h">Real students,<br/>real progress</h2>
+          <p className="sec-sub">Every number below updates automatically as students work through lessons in the Student Portal — nothing here is staged.</p>
+
+          {portalStats === false ? (
+            <div className="pd-error">Live stats are temporarily unavailable — please check back shortly.</div>
+          ) : (
+            <>
+              <div className="pd-stats-g">
+                {[
+                  { icon:'fa-user-graduate', label:'Total Students',        val: portalStats?.totalStudents },
+                  { icon:'fa-list-check',    label:'Questions Available',   val: portalStats?.totalQuestionsAvailable },
+                  { icon:'fa-pen',           label:'Questions Attempted',   val: portalStats?.totalQuestionsAttempted },
+                  { icon:'fa-circle-check',  label:'Correct Answers',       val: portalStats?.totalCorrectAnswers },
+                ].map((s,i) => (
+                  <div key={i} className="pd-stat-c">
+                    <div className="pd-stat-ic"><i className={`fa-solid ${s.icon}`}></i></div>
+                    <div className="pd-stat-v">{portalStats ? (s.val ?? 0).toLocaleString('en-IN') : <span className="pd-skel" />}</div>
+                    <div className="pd-stat-l">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="pd-row">
+                <div className="pd-col">
+                  <p className="pd-sub-h"><i className="fa-solid fa-trophy"></i> Top Performers</p>
+                  {!portalStats ? (
+                    <div className="pd-champ-c"><div className="pd-skel" style={{height:'60px'}} /></div>
+                  ) : !portalStats.topPerformers?.overall && !Object.keys(portalStats.topPerformers?.bySubject||{}).length ? (
+                    <div className="pd-empty">No champions yet — be the first!</div>
+                  ) : (
+                    <div className="pd-champ-list">
+                      {portalStats.topPerformers.overall && (
+                        <div className="pd-champ-c pd-champ-overall">
+                          <div className="pd-champ-ic"><i className="fa-solid fa-crown"></i></div>
+                          <div>
+                            <div className="pd-champ-tag">Overall Champion</div>
+                            <div className="pd-champ-name">{portalStats.topPerformers.overall.studentName}</div>
+                            <div className="pd-champ-meta">{portalStats.topPerformers.overall.correct} correct · {portalStats.topPerformers.overall.accuracy}% accuracy</div>
+                          </div>
+                        </div>
+                      )}
+                      {Object.entries(portalStats.topPerformers.bySubject||{}).slice(0,4).map(([subject, champ]) => champ && (
+                        <div key={subject} className="pd-champ-c">
+                          <div className="pd-champ-ic" style={{background:'rgba(245,166,35,.12)',color:'var(--accent)'}}><i className="fa-solid fa-medal"></i></div>
+                          <div>
+                            <div className="pd-champ-tag">{subject} Champion</div>
+                            <div className="pd-champ-name">{champ.studentName}</div>
+                            <div className="pd-champ-meta">{champ.correct} correct · {champ.accuracy}% accuracy</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pd-col">
+                  <p className="pd-sub-h"><i className="fa-solid fa-bolt"></i> Recent Activity</p>
+                  {!portalStats ? (
+                    <div className="pd-champ-c"><div className="pd-skel" style={{height:'60px'}} /></div>
+                  ) : !portalStats.recentActivity?.length ? (
+                    <div className="pd-empty">No recent activity yet.</div>
+                  ) : (
+                    <div className="pd-activity-list">
+                      {portalStats.recentActivity.map((a,i) => (
+                        <div key={i} className="pd-activity-row">
+                          <div className="pd-activity-dot"></div>
+                          <div className="pd-activity-text">
+                            <strong>{a.studentName}</strong> worked on <strong>{a.topic || a.subject}</strong>
+                            {a.subject && a.topic ? <span className="pd-activity-subj"> · {a.subject}</span> : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="pd-cta">
+            <p>Already enrolled? Pick up right where you left off.</p>
+            <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-right-to-bracket"></i> Continue Learning in the Student Portal</a>
           </div>
         </div>
       </section>
@@ -773,7 +952,7 @@ export default function Home() {
                   <div>
                     <div style={{background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.09)',borderRadius:'12px',padding:'20px',marginBottom:'20px'}}>
                       <p style={{fontSize:'12px',fontWeight:700,color:'var(--teal)',marginBottom:'14px',letterSpacing:'0.5px',textTransform:'uppercase'}}>Review Your Details</p>
-                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px 24px',fontSize:'13px',color:'rgba(255,255,255,.7)'}}>
+                      <div className="review-g">
                         <div><span style={{color:'rgba(255,255,255,.4)'}}>Student: </span>{formData.studentName || '—'}</div>
                         <div><span style={{color:'rgba(255,255,255,.4)'}}>DOB: </span>{formData.dob || '—'}</div>
                         <div><span style={{color:'rgba(255,255,255,.4)'}}>Class: </span>{formData.classLevel || '—'}</div>
@@ -812,7 +991,7 @@ export default function Home() {
           <p className="sec-lbl">Get In Touch</p>
           <h2 className="sec-h">Contact Us</h2>
           <p className="sec-sub">Have a question before enrolling? Reach out — we respond within a few hours.</p>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:'20px',marginTop:'48px'}}>
+          <div className="contact-g">
             {[
               { ic:'fa-brands fa-whatsapp', cl:'#4ade80',      label:'WhatsApp', val:'Chat Now',          href:`https://wa.me/${c.whatsappNumber}` },
               { ic:'fa-solid fa-phone',     cl:'#60a5fa',      label:'Phone',    val: c.phone,            href:`tel:${c.phone}` },
