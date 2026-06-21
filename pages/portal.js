@@ -2,6 +2,13 @@ import Head from 'next/head';
 import Script from 'next/script';
 import Link from 'next/link';
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { LanguageProvider, useLanguage, LanguageToggle } from '../lib/i18n';
+import { QUIZ_LEARNING_MODULES_DA, QUIZ_LEARNING_STEPS_DA, QUIZ_ASSIGNMENT_SUBJECTS_DA } from '../lib/quizContentDA';
+import {
+  PORTAL_SETTINGS_DA, PORTAL_NAVIGATION_DA, PORTAL_DASH_STATS_DA, PORTAL_SUBJECTS_DEMO_DA,
+  PORTAL_ATT_STATS_DA, PORTAL_ATT_MONTHLY_DA, PORTAL_ASSIGNMENTS_DEMO_DA, PORTAL_SCHEDULE_DEMO_DA,
+  PORTAL_NOTIFICATIONS_DA, PORTAL_PROFILE_FIELDS_DA,
+} from '../lib/portalContentDA';
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,31 +406,43 @@ function rebuildLearnProgressFromRows(rows, totalStepsFor) {
 // ones that don't exist yet, like a future Class 6 subject), rather than
 // hardcoding five subject names that would silently stop working the moment
 // the subject list changes.
-function computeAchievements(SUBJ, learnProgress) {
+function computeAchievements(SUBJ, learnProgress, t) {
   const badges = [];
   const allProgress = Object.values(learnProgress);
   const totalAttempted = allProgress.reduce((s,p)=>s+(p?.attempted||0),0);
   const totalCorrect   = allProgress.reduce((s,p)=>s+(p?.correct||0),0);
   const completedCount = allProgress.filter(p=>p?.completedAt).length;
 
+  // Last Activity Date — the most recent startedAt/completedAt timestamp
+  // across every module the student has touched, used by the Learning
+  // Analytics card. null if the student hasn't started anything yet.
+  const lastActivityAt = allProgress.reduce((latest, p) => {
+    const ts = p?.completedAt || p?.startedAt;
+    return ts && (!latest || ts > latest) ? ts : latest;
+  }, null);
+
   // One "Explorer" badge per subject the student has made real headway in.
+  // Badge text is built via t() so it's fully translated — these are NOT
+  // hardcoded English strings (a Subject value like "Naturfag" is already
+  // in the right language by the time it gets here, since SUBJ is built
+  // from the language-appropriate assignmentSubjects/learningModules).
   SUBJ.forEach(s => {
     if (s['Progress %'] >= 50) {
       badges.push({
         id: `explorer-${s.Subject}`,
-        label: `${s.Subject} Explorer`,
+        label: t('p_badge_explorer', { subject: s.Subject }),
         icon: 'fa-compass',
         color: s['Color (Hex)'],
-        detail: `${s['Topics Done']}/${s['Total Topics']} topics in ${s.Subject}`,
+        detail: t('p_badge_explorer_detail', { done: s['Topics Done'], total: s['Total Topics'], subject: s.Subject }),
       });
     }
     if (s['Total Topics'] > 0 && s['Topics Done'] === s['Total Topics']) {
       badges.push({
         id: `champion-${s.Subject}`,
-        label: `${s.Subject} Champion`,
+        label: t('p_badge_champion', { subject: s.Subject }),
         icon: 'fa-crown',
         color: s['Color (Hex)'],
-        detail: `Completed every topic in ${s.Subject}`,
+        detail: t('p_badge_champion_detail', { subject: s.Subject }),
       });
     }
   });
@@ -435,40 +454,46 @@ function computeAchievements(SUBJ, learnProgress) {
     return mins > 0 && mins < 10;
   });
   if (fastCompletion) {
-    badges.push({ id:'fast-learner', label:'Fast Learner', icon:'fa-bolt', color:'#f5a623', detail:'Completed a topic in under 10 minutes' });
+    badges.push({ id:'fast-learner', label:t('p_badge_fast_learner'), icon:'fa-bolt', color:'#f5a623', detail:t('p_badge_fast_learner_detail') });
   }
 
   // Consistent Performer — active across multiple subjects, not just one burst.
   const subjectsWithActivity = SUBJ.filter(s => s['Topics Done'] > 0).length;
   if (subjectsWithActivity >= 3 || completedCount >= 5) {
-    badges.push({ id:'consistent', label:'Consistent Performer', icon:'fa-medal', color:'#00c6a7', detail: subjectsWithActivity>=3 ? `Active across ${subjectsWithActivity} subjects` : `${completedCount} topics completed` });
+    badges.push({
+      id:'consistent', label:t('p_badge_consistent'), icon:'fa-medal', color:'#00c6a7',
+      detail: subjectsWithActivity>=3 ? t('p_badge_consistent_subjects', {n: subjectsWithActivity}) : t('p_badge_consistent_topics', {n: completedCount}),
+    });
   }
 
   // Perfectionist — at least one topic completed with a perfect score.
   const perfectTopic = allProgress.find(p => p?.completedAt && p.attempted>0 && p.correct===p.attempted);
   if (perfectTopic) {
-    badges.push({ id:'perfectionist', label:'Perfectionist', icon:'fa-star', color:'#a855f7', detail:'Scored 100% on a topic' });
+    badges.push({ id:'perfectionist', label:t('p_badge_perfectionist'), icon:'fa-star', color:'#a855f7', detail:t('p_badge_perfectionist_detail') });
   }
 
-  return { badges, totalAttempted, totalCorrect, accuracy: totalAttempted ? Math.round((totalCorrect/totalAttempted)*100) : 0, completedCount };
+  return {
+    badges, totalAttempted, totalCorrect, completedCount, lastActivityAt,
+    accuracy: totalAttempted ? Math.round((totalCorrect/totalAttempted)*100) : 0,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERACTIVE LEARNING — topic grid, intro, step-by-step lesson, completion
 // ─────────────────────────────────────────────────────────────────────────────
-function ModuleStatusBadge({ progress, total }) {
+function ModuleStatusBadge({ progress, total, t }) {
   if (!progress || !progress.startedAt) {
-    return <span className="lm-status notstarted"><i className="fa-solid fa-circle-play" /> Not Started</span>;
+    return <span className="lm-status notstarted"><i className="fa-solid fa-circle-play" /> {t('p_not_started')}</span>;
   }
   if (progress.completedAt) {
-    return <span className="lm-status completed"><i className="fa-solid fa-circle-check" /> Completed · {progress.correct}/{total}</span>;
+    return <span className="lm-status completed"><i className="fa-solid fa-circle-check" /> {t('p_completed')} · {progress.correct}/{total}</span>;
   }
-  return <span className="lm-status inprogress"><i className="fa-solid fa-hourglass-half" /> {progress.completionPct||0}% In Progress</span>;
+  return <span className="lm-status inprogress"><i className="fa-solid fa-hourglass-half" /> {progress.completionPct||0}% {t('p_in_progress')}</span>;
 }
 
-function AssignmentSubjectsGrid({ subjects, statsFor, onOpen }) {
+function AssignmentSubjectsGrid({ subjects, statsFor, onOpen, t }) {
   if (!subjects.length) {
-    return <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>No subjects configured yet — check back once your teacher adds one!</div>;
+    return <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>{t('p_no_subjects_configured')}</div>;
   }
   return (
     <div className="asgn-subj-grid">
@@ -486,7 +511,7 @@ function AssignmentSubjectsGrid({ subjects, statsFor, onOpen }) {
               <p className="asgn-subj-tag">{s.Tagline}</p>
             </div>
             <div className="asgn-subj-count">
-              {total>0 ? <><span className="n">{completed}/{total}</span><span className="l">Topics</span></> : <span className="asgn-subj-soon">Coming Soon</span>}
+              {total>0 ? <><span className="n">{completed}/{total}</span><span className="l">{t('p_topics_suffix')}</span></> : <span className="asgn-subj-soon">{t('p_coming_soon')}</span>}
             </div>
           </div>
         );
@@ -495,9 +520,9 @@ function AssignmentSubjectsGrid({ subjects, statsFor, onOpen }) {
   );
 }
 
-function LearningModulesGrid({ modules, stepsFor, progressMap, onOpen }) {
+function LearningModulesGrid({ modules, stepsFor, progressMap, onOpen, t }) {
   if (!modules.length) {
-    return <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>No learning topics yet — check back once your teacher adds one!</div>;
+    return <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>{t('p_no_topics_yet')}</div>;
   }
   return (
     <div className="lm-grid">
@@ -517,7 +542,7 @@ function LearningModulesGrid({ modules, stepsFor, progressMap, onOpen }) {
               <div className="lm-title">{m.Title}</div>
               <p className="lm-teaser">{m.Introduction}</p>
             </div>
-            <ModuleStatusBadge progress={progress} total={total} />
+            <ModuleStatusBadge progress={progress} total={total} t={t} />
           </div>
         );
       })}
@@ -525,7 +550,7 @@ function LearningModulesGrid({ modules, stepsFor, progressMap, onOpen }) {
   );
 }
 
-function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExit, backLabel='Back to topics' }) {
+function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExit, backLabel, t }) {
   const total = steps.length;
   const attemptedCount = progress?.answers ? Object.keys(progress.answers).length : 0;
   const isComplete = !!progress?.completedAt;
@@ -543,11 +568,13 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
   const selected = currentAnswer?.selected ?? null;
   const locked   = !!currentAnswer;
 
+  const resolvedBackLabel = backLabel || t('p_back_to_topics');
+
   if (!module || !total) {
     return (
       <div className="content">
-        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
-        <div className="card" style={{textAlign:'center',color:'var(--muted)'}}>This topic has no steps yet — check back soon.</div>
+        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {resolvedBackLabel}</button>
+        <div className="card" style={{textAlign:'center',color:'var(--muted)'}}>{t('p_no_steps_yet')}</div>
       </div>
     );
   }
@@ -578,7 +605,7 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
     const correct   = Object.values(nextAnswers).filter(a=>a.isCorrect).length;
     onSave({ attempted, correct, incorrect: attempted-correct, completionPct: Math.round((attempted/total)*100), answers: nextAnswers });
     onAnswer?.({
-      moduleId: module['Module ID'], subject: module.Subject, topic: module.Title,
+      moduleId: module['Module ID'], subject: module.SubjectEN || module.Subject, topic: module.Title,
       questionNumber: step['Step Number'], answerGiven: step[`Option ${letter}`] || letter,
       correctAnswer: step[`Option ${step['Correct Option']}`] || step['Correct Option'], isCorrect,
     });
@@ -600,7 +627,7 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
   if (view === 'intro') {
     return (
       <div className="content">
-        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
+        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {resolvedBackLabel}</button>
         <div className="card lp-hero">
           <div className="lp-hero-icon" style={{background:`${module['Color (Hex)']}22`,color:module['Color (Hex)']}}>
             {module.Emoji || <i className={`fa-solid ${module['Icon (FontAwesome solid)']||'fa-book'}`} />}
@@ -610,13 +637,13 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
           <div className="lp-actions">
             {isComplete ? (
               <>
-                <button className="btn-t" onClick={retake}><i className="fa-solid fa-rotate-right" /> Retake Topic</button>
-                <button className="btn-outline" onClick={() => { setAnswers(progress.answers||{}); setView('complete'); }}><i className="fa-solid fa-list-check" /> Review My Answers</button>
+                <button className="btn-t" onClick={retake}><i className="fa-solid fa-rotate-right" /> {t('p_retake_topic')}</button>
+                <button className="btn-outline" onClick={() => { setAnswers(progress.answers||{}); setView('complete'); }}><i className="fa-solid fa-list-check" /> {t('p_review_my_answers')}</button>
               </>
             ) : attemptedCount > 0 ? (
-              <button className="btn-t" onClick={() => begin(attemptedCount)}><i className="fa-solid fa-play" /> Continue · Step {attemptedCount+1} of {total}</button>
+              <button className="btn-t" onClick={() => begin(attemptedCount)}><i className="fa-solid fa-play" /> {t('p_continue_step', {n: attemptedCount+1, total})}</button>
             ) : (
-              <button className="btn-t" onClick={() => begin(0)}><i className="fa-solid fa-play" /> Start Learning</button>
+              <button className="btn-t" onClick={() => begin(0)}><i className="fa-solid fa-play" /> {t('p_start_learning')}</button>
             )}
           </div>
         </div>
@@ -630,10 +657,10 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
     const correctCount = Object.values(finalAnswers).filter(a=>a.isCorrect).length;
     const pct = total ? Math.round((correctCount/total)*100) : 0;
     const mistakes = Object.values(finalAnswers).filter(a=>!a.isCorrect);
-    const encourage = pct>=90 ? `Excellent work! You're a ${module.Subject} star!`
-      : pct>=70 ? 'Great job — you really understand this topic!'
-      : pct>=50 ? "Nice effort! A bit more practice and you'll have it mastered."
-      : "Good try! Let's look at what tripped you up below.";
+    const encourage = pct>=90 ? t('p_excellent_star', {subject: module.Subject})
+      : pct>=70 ? t('p_great_job')
+      : pct>=50 ? t('p_nice_effort')
+      : t('p_good_try');
     // Group the concept recap by Learning Section (falls back to one flat group if a
     // module doesn't define sections, e.g. older/simpler modules).
     const conceptGroups = [];
@@ -645,11 +672,11 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
     });
     return (
       <div className="content">
-        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
+        <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {resolvedBackLabel}</button>
         <div className="card">
-          <div className="lp-score-ring"><span className="n">{correctCount}/{total}</span><span className="l">{pct}% Correct</span></div>
+          <div className="lp-score-ring"><span className="n">{correctCount}/{total}</span><span className="l">{pct}% {t('p_pct_correct')}</span></div>
           <p className="lp-encourage">{encourage}</p>
-          <div className="sec-divider">Concepts You Learned</div>
+          <div className="sec-divider">{t('p_concepts_learned')}</div>
           {conceptGroups.map((g,gi) => (
             <div key={gi} style={g.label?{marginBottom:'14px'}:undefined}>
               {g.label && <div className="lp-concept-section-lbl">{g.label}</div>}
@@ -658,26 +685,26 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
           ))}
           {mistakes.length > 0 ? (
             <>
-              <div className="sec-divider">Review Your Mistakes</div>
+              <div className="sec-divider">{t('p_review_mistakes')}</div>
               {mistakes.map((m,i) => (
                 <div key={i} className="lp-mistake">
                   <div className="lp-mistake-q">{m.question}</div>
-                  <div className="lp-mistake-row">Your answer: <span style={{color:'#f87171',fontWeight:700}}>{m.options[m.selected]}</span></div>
-                  <div className="lp-mistake-row">Correct answer: <span style={{color:'#4ade80',fontWeight:700}}>{m.options[m.correctOpt]}</span></div>
+                  <div className="lp-mistake-row">{t('p_your_answer')} <span style={{color:'#f87171',fontWeight:700}}>{m.options[m.selected]}</span></div>
+                  <div className="lp-mistake-row">{t('p_correct_answer')} <span style={{color:'#4ade80',fontWeight:700}}>{m.options[m.correctOpt]}</span></div>
                   <div className="lp-mistake-row">{m.explanation}</div>
                 </div>
               ))}
             </>
-          ) : <div className="sec-divider">Perfect Score — No Mistakes!</div>}
+          ) : <div className="sec-divider">{t('p_perfect_score')}</div>}
           {module['Now You Try'] && (
             <div className="lp-try-card">
-              <div className="lp-try-lbl"><i className="fa-solid fa-pen-fancy" /> Now You Try</div>
+              <div className="lp-try-lbl"><i className="fa-solid fa-pen-fancy" /> {t('p_now_you_try')}</div>
               <p>{module['Now You Try']}</p>
             </div>
           )}
           <div className="lp-actions">
-            <button className="btn-t" onClick={retake}><i className="fa-solid fa-rotate-right" /> Retake Topic</button>
-            <button className="btn-outline" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
+            <button className="btn-t" onClick={retake}><i className="fa-solid fa-rotate-right" /> {t('p_retake_topic')}</button>
+            <button className="btn-outline" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {resolvedBackLabel}</button>
           </div>
         </div>
       </div>
@@ -687,24 +714,50 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
   // ── LESSON (teach a fact, then ask about it) ──
   const opts = ['A','B','C','D'];
   const answeredCount = Object.keys(answers).length;
+  const progressPct = total ? Math.round((answeredCount/total)*100) : 0;
+  // Dots work well as a visual progress map for shorter modules, but at 30-50
+  // questions (e.g. the Nouns module) they become too small to tap reliably
+  // on mobile and don't convey much at a glance. Past that threshold, swap
+  // to a compact "Jump to question" dropdown — same ability to revisit any
+  // previously-answered question, just a usable control at any length.
+  const useDotNav = total <= 20;
   return (
     <div className="content">
-      <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {backLabel}</button>
+      <button className="lp-back" onClick={onExit}><i className="fa-solid fa-arrow-left" /> {resolvedBackLabel}</button>
       <div className="card">
-        <div className="lp-step-lbl">Step {idx+1} of {total} · {step['Learning Section'] || module.Title}</div>
+        <div className="lp-step-lbl">{step['Learning Section'] || module.Title}</div>
+        <div className="lp-qcounter-row">
+          <span className="lp-qcounter">{t('p_question_of', {n: idx+1, total})}</span>
+          <span className="lp-qpct">{t('p_progress_pct', {pct: progressPct})}</span>
+        </div>
         {/* Progress reflects questions actually answered, not just how far idx has
             moved — important now that Previous/Next can move idx around freely
             without that meaning more questions were answered. */}
-        <div className="lp-bar-outer"><div className="lp-bar-fill" style={{width:`${(answeredCount/total)*100}%`}} /></div>
-        <div className="lp-dots">
-          {steps.map((s,i) => {
-            const a = answers[s['Step Number']];
-            let cls = 'lp-dot';
-            if (i === idx) cls += ' current';
-            else if (a) cls += a.isCorrect ? ' correct' : ' incorrect';
-            return <button key={s['Step Number']} className={cls} onClick={()=>setIdx(i)} aria-label={`Question ${i+1}${a?(a.isCorrect?', answered correctly':', answered incorrectly'):', not yet answered'}`} />;
-          })}
-        </div>
+        <div className="lp-bar-outer"><div className="lp-bar-fill" style={{width:`${progressPct}%`}} /></div>
+        {useDotNav ? (
+          <div className="lp-dots">
+            {steps.map((s,i) => {
+              const a = answers[s['Step Number']];
+              let cls = 'lp-dot';
+              if (i === idx) cls += ' current';
+              else if (a) cls += a.isCorrect ? ' correct' : ' incorrect';
+              return <button key={s['Step Number']} className={cls} onClick={()=>setIdx(i)} aria-label={`${t('p_aria_question', {n: i+1})}${a?(a.isCorrect?t('p_aria_answered_correctly'):t('p_aria_answered_incorrectly')):t('p_aria_not_yet_answered')}`} />;
+            })}
+          </div>
+        ) : (
+          <select
+            className="lp-jump-select"
+            aria-label={t('p_jump_to_question')}
+            value={idx}
+            onChange={e => setIdx(Number(e.target.value))}
+          >
+            {steps.map((s,i) => {
+              const a = answers[s['Step Number']];
+              const status = a ? (a.isCorrect ? '✓' : '✗') : '○';
+              return <option key={s['Step Number']} value={i}>{status} {t('p_question_of', {n: i+1, total})}</option>;
+            })}
+          </select>
+        )}
         <div className="lp-teach"><i className="fa-solid fa-lightbulb" /><p>{step.Teaching}</p></div>
         <div className="lp-q">{step.Question}</div>
         <div className="lp-opts">
@@ -724,23 +777,23 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
         {locked && (
           <div className={`lp-feedback ${selected===step['Correct Option']?'good':'bad'}`}>
             <i className={`fa-solid ${selected===step['Correct Option']?'fa-circle-check':'fa-circle-info'}`} />
-            <p><strong>{selected===step['Correct Option']?'Correct! ':'Not quite. '}</strong>{step.Explanation}</p>
+            <p><strong>{selected===step['Correct Option']?t('p_correct_excl'):t('p_not_quite')}</strong>{step.Explanation}</p>
             {step['Learn More URL'] && (
               <a className="lp-learnmore" href={step['Learn More URL']} target="_blank" rel="noopener noreferrer">
-                <i className="fa-solid fa-book-open" /> {step['Learn More Label'] || 'Learn more'} <i className="fa-solid fa-arrow-up-right-from-square" />
+                <i className="fa-solid fa-book-open" /> {step['Learn More Label'] || t('p_learn_more')} <i className="fa-solid fa-arrow-up-right-from-square" />
               </a>
             )}
           </div>
         )}
         <div className="lp-nav-row">
           <button className="btn-outline" onClick={goPrev} disabled={idx===0} style={idx===0?{opacity:.4,cursor:'not-allowed'}:{}}>
-            <i className="fa-solid fa-arrow-left" /> Previous
+            <i className="fa-solid fa-arrow-left" /> {t('p_previous')}
           </button>
           {answeredCount >= total ? (
-            <button className="btn-t" onClick={finish}>Finish Topic <i className="fa-solid fa-flag-checkered" /></button>
+            <button className="btn-t" onClick={finish}>{t('p_finish_topic')} <i className="fa-solid fa-flag-checkered" /></button>
           ) : (
             <button className="btn-t" onClick={goNext} disabled={!locked} style={!locked?{opacity:.4,cursor:'not-allowed'}:{}}>
-              {idx+1 < total ? <>Next Question <i className="fa-solid fa-arrow-right" /></> : <>Answer to Continue <i className="fa-solid fa-arrow-right" /></>}
+              {idx+1 < total ? <>{t('p_next_question')} <i className="fa-solid fa-arrow-right" /></> : <>{t('p_answer_to_continue')} <i className="fa-solid fa-arrow-right" /></>}
             </button>
           )}
         </div>
@@ -752,8 +805,45 @@ function LearningModulePlayer({ module, steps, progress, onSave, onAnswer, onExi
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
-export default function Portal() {
-  const [cfg,         setCfg]         = useState(FALLBACK);
+function PortalInner() {
+  const { lang, t } = useLanguage();
+  // The live Google Sheets behind /api/portal-config (Mathematics, Science,
+  // English Grammar, Social Studies, General Knowledge, AI question banks)
+  // are English-only content maintained by teachers — there is no Danish
+  // column in those sheets today. So, mirroring the landing page's approach:
+  //  - English: fetch and prefer live Sheet data, exactly as before.
+  //  - Danish: use the hand-translated QUIZ_LEARNING_MODULES_DA /
+  //    QUIZ_LEARNING_STEPS_DA dataset (see lib/quizContentDA.js) for
+  //    learningModules/learningSteps, and skip the Sheet fetch override for
+  //    those two keys so Danish text is never silently replaced by English
+  //    Sheet content. Everything else fetched from the Sheet (assignment
+  //    subjects list, dashboard stats, attendance, etc.) still uses
+  //    FALLBACK / live data in English, since translating those config rows
+  //    is a separate, smaller task (mostly subject names) — see
+  //    translateSubjectName() below, used wherever a bare subject name is
+  //    rendered in the UI.
+  //
+  // Note: 'English Grammar' subject's modules/steps are intentionally NOT
+  // translated even within QUIZ_LEARNING_MODULES_DA/STEPS_DA — see the
+  // comment at the top of lib/quizContentDA.js for why.
+  const danishFallback = {
+    ...FALLBACK,
+    settings: { ...FALLBACK.settings, ...PORTAL_SETTINGS_DA },
+    navigation: PORTAL_NAVIGATION_DA,
+    dashStats: PORTAL_DASH_STATS_DA,
+    subjects: PORTAL_SUBJECTS_DEMO_DA,
+    attStats: PORTAL_ATT_STATS_DA,
+    attMonthly: PORTAL_ATT_MONTHLY_DA,
+    assignments: PORTAL_ASSIGNMENTS_DEMO_DA,
+    schedule: PORTAL_SCHEDULE_DEMO_DA,
+    notifications: PORTAL_NOTIFICATIONS_DA,
+    profileFields: PORTAL_PROFILE_FIELDS_DA,
+    learningModules: QUIZ_LEARNING_MODULES_DA,
+    learningSteps: QUIZ_LEARNING_STEPS_DA,
+    assignmentSubjects: QUIZ_ASSIGNMENT_SUBJECTS_DA,
+  };
+  const baseFallback = lang === 'da' ? danishFallback : FALLBACK;
+  const [cfg,         setCfg]         = useState(baseFallback);
   const [cfgReady,    setCfgReady]    = useState(false);
   const [authed,      setAuthed]      = useState(false);
   const [tab,         setTab]         = useState('dashboard');
@@ -775,10 +865,27 @@ export default function Portal() {
   const attendRef  = useRef(null);
   const ratioRef   = useRef(null);
 
-  // ── Fetch from Google Sheets on mount ────────────────────────────────────────
+  // Whenever the language changes, immediately reset cfg to that language's
+  // base fallback so the UI never shows a mix of English Sheet quiz content
+  // and Danish static text (or vice versa) while a fetch is in flight, and
+  // re-run the fetch below so non-quiz config (subjects list, schedule,
+  // etc.) still gets refreshed from the Sheet.
   useEffect(() => {
+    setCfg(lang === 'da' ? danishFallback : FALLBACK);
+  }, [lang]);
+
+  // ── Fetch from Google Sheets on mount / language change ──────────────────────
+  useEffect(() => {
+    const requestLang = lang; // capture the language this fetch was started for
+    let cancelled = false;
     fetchAllSheetData()
       .then(data => {
+        // Guard against a race: if the user switched language again while
+        // this fetch was in flight, a stale response for the OLD language
+        // must never overwrite the cfg that's already correct for the
+        // CURRENT language. The effect's own cleanup (below) sets
+        // `cancelled` for exactly this case.
+        if (cancelled) return;
         // Validate that the response is at least a plain object before applying it.
         // NOTE: portal-config.js currently only returns assignment-related keys
         // (assignmentSubjects / learningModules / learningSteps) — it does NOT
@@ -790,21 +897,32 @@ export default function Portal() {
           setCfgReady(true);
           return;
         }
-        // Merge with FALLBACK so any missing keys are still populated
+        // Merge with the language-appropriate fallback so any missing keys
+        // are still populated. learningModules/learningSteps are sourced
+        // from the live (English-only) Sheet ONLY in English — in Danish we
+        // always keep the hand-translated QUIZ_LEARNING_MODULES_DA/STEPS_DA,
+        // never overwritten by the Sheet fetch.
+        const base = requestLang === 'da' ? danishFallback : FALLBACK;
         const merged = {
-          settings:      { ...FALLBACK.settings,      ...(data.settings      || {}) },
-          navigation:    data.navigation?.length      ? data.navigation      : FALLBACK.navigation,
-          dashStats:     data.dashStats?.length       ? data.dashStats       : FALLBACK.dashStats,
-          subjects:      data.subjects?.length        ? data.subjects        : FALLBACK.subjects,
-          attStats:      data.attStats?.length        ? data.attStats        : FALLBACK.attStats,
-          attMonthly:    data.attMonthly?.length      ? data.attMonthly      : FALLBACK.attMonthly,
-          assignments:   data.assignments?.length     ? data.assignments     : FALLBACK.assignments,
-          schedule:      data.schedule?.length        ? data.schedule        : FALLBACK.schedule,
-          notifications: data.notifications?.length   ? data.notifications   : FALLBACK.notifications,
-          profileFields: data.profileFields?.length   ? data.profileFields   : FALLBACK.profileFields,
-          assignmentSubjects: data.assignmentSubjects?.length ? data.assignmentSubjects : FALLBACK.assignmentSubjects,
-          learningModules: data.learningModules?.length ? data.learningModules : FALLBACK.learningModules,
-          learningSteps:   data.learningSteps?.length   ? data.learningSteps   : FALLBACK.learningSteps,
+          settings:      { ...base.settings,      ...(data.settings      || {}) },
+          navigation:    data.navigation?.length      ? data.navigation      : base.navigation,
+          dashStats:     data.dashStats?.length       ? data.dashStats       : base.dashStats,
+          subjects:      data.subjects?.length        ? data.subjects        : base.subjects,
+          attStats:      data.attStats?.length        ? data.attStats        : base.attStats,
+          attMonthly:    data.attMonthly?.length      ? data.attMonthly      : base.attMonthly,
+          assignments:   data.assignments?.length     ? data.assignments     : base.assignments,
+          schedule:      data.schedule?.length        ? data.schedule        : base.schedule,
+          notifications: data.notifications?.length   ? data.notifications   : base.notifications,
+          profileFields: data.profileFields?.length   ? data.profileFields   : base.profileFields,
+          assignmentSubjects: requestLang === 'da'
+            ? danishFallback.assignmentSubjects
+            : (data.assignmentSubjects?.length ? data.assignmentSubjects : base.assignmentSubjects),
+          learningModules: requestLang === 'da'
+            ? danishFallback.learningModules
+            : (data.learningModules?.length ? data.learningModules : base.learningModules),
+          learningSteps: requestLang === 'da'
+            ? danishFallback.learningSteps
+            : (data.learningSteps?.length   ? data.learningSteps   : base.learningSteps),
         };
         setCfg(merged);
         setNotifs(merged.notifications.filter(n=>isRowActive(n.Active)));
@@ -813,10 +931,12 @@ export default function Portal() {
         setCfgReady(true);
       })
       .catch(err => {
+        if (cancelled) return;
         console.warn('[portal] Sheet fetch failed, using fallback:', err.message);
         setCfgReady(true); // still show portal with fallback data
       });
-  }, []);
+    return () => { cancelled = true; };
+  }, [lang]);
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
   const S          = cfg.settings;
@@ -874,8 +994,42 @@ export default function Portal() {
   // learnProgress data — see computeAchievements() above for the full badge
   // logic. liveQuizAvg backs the 'avg_score' stat card and 'ratio_quiz_avg'
   // donut slice with a real number instead of the sample 65/78 placeholders.
-  const achievements = computeAchievements(SUBJ, learnProgress);
+  const achievements = computeAchievements(SUBJ, learnProgress, t);
   const liveQuizAvg = achievements.totalAttempted ? achievements.accuracy : null;
+
+  // Quick Access ("Continue Learning" — Req #4): find the most recently
+  // touched module that's been started but not finished, across every
+  // subject, so the dashboard button can jump straight back into it instead
+  // of just opening the subject picker. Falls back to null if the student
+  // has no in-progress module (brand-new student, or everything they've
+  // started is already complete) — the button still works in that case, it
+  // just opens the Assignments subject picker instead.
+  const resumeTarget = (() => {
+    let best = null; // { subjectName, moduleId, lastTs }
+    LMOD.forEach(m => {
+      const p = learnProgress[m['Module ID']];
+      if (!p?.startedAt || p?.completedAt) return; // only "in progress" modules
+      const ts = p.startedAt;
+      if (!best || ts > best.lastTs) best = { subjectName: m.Subject, moduleId: m['Module ID'], lastTs: ts };
+    });
+    return best;
+  })();
+
+  // Jumps to Assignments and, if there's an in-progress module, straight
+  // into it. This is safe with the tab-change effect elsewhere that resets
+  // activeModuleId/activeAssignmentSubject — that effect only fires when
+  // tab !== 'assignments', so setting tab to 'assignments' here never
+  // triggers it to clobber the subject/module we just set.
+  const resumeLearning = () => {
+    if (resumeTarget) {
+      setActiveAssignmentSubject(resumeTarget.subjectName);
+      setActiveModuleId(resumeTarget.moduleId);
+    } else {
+      setActiveAssignmentSubject(null);
+      setActiveModuleId(null);
+    }
+    setTab('assignments');
+  };
 
   const statCards  = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && ['attendance_pct','submissions_pct','avg_score','pending_tasks'].includes(s['Metric Key']))
     .map(s => s['Metric Key']==='avg_score' && liveQuizAvg!==null ? { ...s, Value:String(liveQuizAvg) } : s);
@@ -913,7 +1067,7 @@ export default function Portal() {
 
     if (rEl && ratioStats.length) ratioRef.current = new window.Chart(rEl, {
       type: 'doughnut',
-      data: { labels: ratioStats.map(r => r.Label.replace(' (Ratio Chart)','')), datasets: [{ data: ratioStats.map(r => Number(r.Value)||0), backgroundColor:['rgba(0,198,167,.85)','rgba(168,85,247,.85)','rgba(245,166,35,.85)'], borderWidth:0, hoverOffset:6 }] },
+      data: { labels: ratioStats.map(r => r.Label.replace(/\s*\([^)]*\)\s*$/, '')), datasets: [{ data: ratioStats.map(r => Number(r.Value)||0), backgroundColor:['rgba(0,198,167,.85)','rgba(168,85,247,.85)','rgba(245,166,35,.85)'], borderWidth:0, hoverOffset:6 }] },
       options: { responsive:true, maintainAspectRatio:false, cutout:'68%', plugins:{ legend:{ position:'bottom', labels:{ color:'#94a3b8', font:{size:12}, boxWidth:12, padding:14 } } } },
     });
   }, [cfgReady, SUBJ, AMON, ratioStats, destroyCharts]);
@@ -938,8 +1092,8 @@ export default function Portal() {
       const res  = await fetch(S.AuthAPIEndpoint||'/api/student/auth', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p}) });
       const data = await res.json();
       if (res.ok && data.authenticated) { setProfile(prev => ({...prev, name:data.username, id:data.studentId})); setAuthed(true); }
-      else setLoginErr(data.message || 'Invalid credentials.');
-    } catch { setLoginErr(S.ConnectionErrorMsg || 'Connection failed.'); }
+      else setLoginErr(data.message || t('p_invalid_credentials'));
+    } catch { setLoginErr(S.ConnectionErrorMsg || t('p_connection_failed')); }
     finally { setLoading(false); }
   };
 
@@ -1093,11 +1247,11 @@ export default function Portal() {
     .lo-btn:hover{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3);color:#f87171;}
     .main{flex:1;overflow-y:auto;background:var(--navy);}
     /* Mobile hamburger trigger — hidden on desktop, shown only under the 640px breakpoint below */
-    .mnav-toggle{display:none;align-items:center;justify-content:center;width:38px;height:38px;flex-shrink:0;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:#fff;font-size:16px;cursor:pointer;}
+    .mnav-toggle{display:none;align-items:center;justify-content:center;width:44px;height:44px;flex-shrink:0;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:#fff;font-size:16px;cursor:pointer;}
     .mnav-toggle:hover{background:rgba(255,255,255,.08);}
     .mnav-bar{display:none;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--navy);z-index:50;}
     .mnav-bar-title{font-family:var(--fd);font-size:15px;font-weight:800;color:#fff;}
-    .mnav-close{display:none;align-items:center;justify-content:center;width:30px;height:30px;flex-shrink:0;border-radius:8px;border:none;background:rgba(255,255,255,.06);color:rgba(255,255,255,.6);font-size:14px;cursor:pointer;}
+    .mnav-close{display:none;align-items:center;justify-content:center;width:44px;height:44px;flex-shrink:0;border-radius:8px;border:none;background:rgba(255,255,255,.06);color:rgba(255,255,255,.6);font-size:14px;cursor:pointer;}
     .mnav-close:hover{background:rgba(255,255,255,.12);color:#fff;}
     /* Tap-outside backdrop behind the drawer — only rendered/active on mobile while open */
     .mnav-backdrop{display:none;}
@@ -1122,7 +1276,7 @@ export default function Portal() {
     .sp-fill{height:100%;border-radius:100px;transition:width .8s ease;}
     .sp-detail-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:9px;font-size:11.5px;color:var(--muted);}
     .sp-detail-row i{margin-right:4px;}
-    .ana-stats-g{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;}
+    .ana-stats-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:14px;}
     .ana-stat{text-align:center;padding:14px 8px;background:var(--surf2);border-radius:11px;}
     .ana-stat-v{font-family:var(--fd);font-size:22px;font-weight:900;color:#fff;line-height:1;margin-bottom:5px;}
     .ana-stat-l{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
@@ -1194,6 +1348,10 @@ export default function Portal() {
     .prof-inp:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(0,198,167,.15);}
     .btn-t{background:linear-gradient(135deg,var(--teal),#0099cc);border:none;border-radius:10px;padding:11px 22px;color:#fff;font-family:var(--fb);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:7px;}
     .btn-t:hover{opacity:.9;transform:translateY(-1px);}
+    .btn-t-sm{padding:8px 16px;font-size:12px;flex-shrink:0;}
+    .card-t-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px;flex-wrap:wrap;}
+    .card-t-row .card-t{margin-bottom:0;}
+    @media(max-width:640px){.card-t-row{flex-direction:column;align-items:stretch;}.card-t-row .btn-t-sm{width:100%;justify-content:center;}}
     .btn-outline{background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:11px 22px;color:rgba(255,255,255,.7);font-family:var(--fb);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:7px;}
     .btn-outline:hover{border-color:var(--teal);color:var(--teal);}
     .wbanner{background:linear-gradient(135deg,rgba(0,198,167,.15),rgba(0,153,204,.1));border:1px solid rgba(0,198,167,.2);border-radius:var(--r);padding:22px 26px;margin-bottom:22px;display:flex;align-items:center;justify-content:space-between;gap:16px;}
@@ -1220,6 +1378,12 @@ export default function Portal() {
       .lb-row{flex-wrap:wrap;}
       .lb-stats{width:100%;justify-content:flex-start;margin-left:44px;}
       .lb-subj-grid{grid-template-columns:1fr;}
+      /* Touch-friendly tap targets (Req #9) — the sidebar nav items and quiz
+         question dots were sized for a mouse cursor; bump both to the
+         ~44px minimum recommended for touch on small screens. */
+      .nb{padding:13px 11px;min-height:44px;}
+      .lp-dot{width:16px;height:16px;}
+      .lp-dot.current{width:18px;height:18px;}
     }
     /* ── Interactive Learning ─────────────────────────────────────────── */
     .sec-divider{display:flex;align-items:center;gap:9px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:30px 0 16px;}
@@ -1263,6 +1427,9 @@ export default function Portal() {
     .lp-hero h2{font-family:var(--fd);font-size:24px;font-weight:900;color:#fff;}
     .lp-hero p{font-size:14px;color:rgba(255,255,255,.65);line-height:1.7;max-width:480px;}
     .lp-step-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;}
+    .lp-qcounter-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+    .lp-qcounter{font-family:var(--fd);font-size:18px;font-weight:800;color:#fff;}
+    .lp-qpct{font-size:12px;font-weight:700;color:var(--teal);}
     .lp-bar-outer{width:100%;height:8px;background:rgba(255,255,255,.07);border-radius:100px;overflow:hidden;margin-bottom:20px;}
     .lp-bar-fill{height:100%;border-radius:100px;background:var(--teal);transition:width .4s ease;}
     .lp-dots{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:22px;}
@@ -1271,6 +1438,8 @@ export default function Portal() {
     .lp-dot.current{width:13px;height:13px;background:var(--teal);box-shadow:0 0 0 3px rgba(0,198,167,.22);}
     .lp-dot.correct{background:#22c55e;}
     .lp-dot.incorrect{background:#ef4444;}
+    .lp-jump-select{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:10px 12px;color:#fff;font-family:var(--fb);font-size:13px;font-weight:600;margin-bottom:22px;cursor:pointer;}
+    .lp-jump-select:focus{outline:none;border-color:var(--teal);}
     .lp-nav-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;}
     .lp-teach{background:rgba(0,198,167,.07);border:1px solid rgba(0,198,167,.18);border-radius:12px;padding:16px 18px;margin-bottom:20px;display:flex;gap:12px;align-items:flex-start;}
     .lp-teach i{color:var(--teal);font-size:16px;margin-top:2px;}
@@ -1312,8 +1481,8 @@ export default function Portal() {
   `;
 
   const mergedProfile = [
-    { label:'Full Name',  val:profile.name,  readonly:true },
-    { label:'Student ID', val:profile.id,    readonly:true },
+    { label:t('p_full_name'),  val:profile.name,  readonly:true },
+    { label:t('p_student_id'), val:profile.id,    readonly:true },
     ...PFIELDS.map(f => ({ label:f.Label, val:f.Value, readonly: f['Read-Only']==='Yes'||f['Read-Only']===true })),
   ];
 
@@ -1330,16 +1499,17 @@ export default function Portal() {
         <div className="lw">
           <div className="lbg" />
           <div className="lb">
+            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'4px'}}><LanguageToggle /></div>
             <div className="li"><i className="fa-solid fa-shield-halved" /></div>
             <h1 className="lh">{S.LoginHeading}</h1>
             <p className="ls">{S.LoginSubheading}</p>
             <form onSubmit={handleLogin}>
               <div className="field">
-                <label className="fl">Username or Student ID</label>
-                <div className="fw"><i className="fa-solid fa-user fi" /><input name="username" required className="inp" placeholder="e.g. rohan.sharma or APX262834" /></div>
+                <label className="fl">{t('p_username_or_id')}</label>
+                <div className="fw"><i className="fa-solid fa-user fi" /><input name="username" required className="inp" placeholder={t('p_username_ph')} /></div>
               </div>
               <div className="field">
-                <label className="fl">Password</label>
+                <label className="fl">{t('p_password')}</label>
                 <div className="fw"><i className="fa-solid fa-lock fi" /><input name="password" type="password" required className="inp" placeholder="••••••••" /></div>
               </div>
               <button type="submit" className="lbtn" disabled={loading}>
@@ -1361,18 +1531,19 @@ export default function Portal() {
             <div className="sb-head">
               <div className="sb-av"><i className="fa-solid fa-user-graduate" /></div>
               <div style={{flex:1,minWidth:0}}><div className="sb-name">{profile.name}</div><div className="sb-id">{profile.id}</div></div>
-              <button className="mnav-close" onClick={()=>setMobileNavOpen(false)} aria-label="Close navigation menu"><i className="fa-solid fa-xmark" /></button>
+              <button className="mnav-close" onClick={()=>setMobileNavOpen(false)} aria-label={t('p_close_nav')}><i className="fa-solid fa-xmark" /></button>
             </div>
             <p className="sb-sec">{S.SidebarSectionLabel}</p>
             <nav className="sb-nav">
-              {NAV.map(t => (
-                <button key={t.ID} className={`nb${tab===t.ID?' active':''}`} onClick={() => setTab(t.ID)}>
-                  <i className={`fa-solid ${t['Icon (FontAwesome solid)']}`} /> {t.Label}
-                  {t.ID==='notifications' && unreadCount>0 && <span className="nb-badge">{unreadCount}</span>}
+              {NAV.map(navItem => (
+                <button key={navItem.ID} className={`nb${tab===navItem.ID?' active':''}`} onClick={() => setTab(navItem.ID)}>
+                  <i className={`fa-solid ${navItem['Icon (FontAwesome solid)']}`} /> {navItem.Label}
+                  {navItem.ID==='notifications' && unreadCount>0 && <span className="nb-badge">{unreadCount}</span>}
                 </button>
               ))}
             </nav>
             <div className="sb-ft">
+              <div style={{marginBottom:'10px'}}><LanguageToggle style={{width:'100%',justifyContent:'center'}} /></div>
               <button className="lo-btn" onClick={handleLogout}><i className="fa-solid fa-power-off" /> {S.SignOutLabel}</button>
             </div>
           </aside>
@@ -1383,7 +1554,7 @@ export default function Portal() {
             {/* Mobile-only top bar: hamburger to open the drawer. Hidden on
                 desktop via CSS (.mnav-toggle has display:none until 640px). */}
             <div className="mnav-bar">
-              <button className="mnav-toggle" onClick={()=>setMobileNavOpen(true)} aria-label="Open navigation menu">
+              <button className="mnav-toggle" onClick={()=>setMobileNavOpen(true)} aria-label={t('p_open_nav')}>
                 <i className="fa-solid fa-bars" />
               </button>
               <span className="mnav-bar-title">{S.SiteName}</span>
@@ -1391,37 +1562,38 @@ export default function Portal() {
 
             {/* DASHBOARD */}
             {tab==='dashboard' && (<>
-              <div className="main-top"><div><div className="pg-h">Dashboard</div><div className="pg-s">{S.DashboardSubtitle}</div></div></div>
+              <div className="main-top"><div><div className="pg-h">{t('p_dashboard_title')}</div><div className="pg-s">{S.DashboardSubtitle}</div></div></div>
               <div className="content">
                 <div className="wbanner">
-                  <div><h2>{greeting}</h2><p>{profile.classLevel} · Student ID: {profile.id} · Enrollment: {S.EnrolmentStatus}</p></div>
+                  <div><h2>{greeting}</h2><p>{profile.classLevel} · {t('p_student_id')}: {profile.id} · {t('p_enrollment')}: {S.EnrolmentStatus}</p></div>
                   <div className="av-big"><i className="fa-solid fa-user-graduate" /></div>
                 </div>
-                <div className="sr">
-                  {!cfgReady ? [1,2,3,4].map(i=><div key={i} className="sc"><SK h="60px" /></div>)
-                  : statCards.map((s,i) => (
-                    <div key={i} className="sc">
-                      <div className="sc-l">{s.Label}</div>
-                      <div className="sc-v" style={s['Metric Key']==='pending_tasks'?{color:'#f97316'}:{}}>{s.Value}</div>
-                      <div className="sc-s">{s['Sub-label']}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="cr">
-                  <div className="card"><div className="card-t"><i className="fa-solid fa-chart-bar" /> Subject Progress</div><div className="cv"><canvas id="subjectChart" /></div></div>
-                  <div className="card"><div className="card-t"><i className="fa-solid fa-circle-half-stroke" /> Performance Ratios</div><div className="cv"><canvas id="ratioChart" /></div></div>
-                </div>
+
+                {/* Learning Analytics — moved to the top of the dashboard so it's
+                    the first thing a student sees after logging in (Req #1).
+                    Now includes Last Activity Date and Subjects Completed,
+                    and the Quick Access button (Req #4) sits right inside it
+                    so "see my stats" and "get back to learning" are one glance
+                    apart, not opposite ends of the page. */}
                 <div className="card" style={{marginBottom:'22px'}}>
-                  <div className="card-t"><i className="fa-solid fa-chart-simple" /> Learning Analytics</div>
-                  <div className="ana-stats-g">
-                    <div className="ana-stat"><div className="ana-stat-v">{achievements.totalAttempted}</div><div className="ana-stat-l">Questions Attempted</div></div>
-                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#4ade80'}}>{achievements.totalCorrect}</div><div className="ana-stat-l">Correct Answers</div></div>
-                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#f87171'}}>{achievements.totalAttempted-achievements.totalCorrect}</div><div className="ana-stat-l">Incorrect Answers</div></div>
-                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'var(--teal)'}}>{achievements.accuracy}%</div><div className="ana-stat-l">Overall Accuracy</div></div>
-                    <div className="ana-stat"><div className="ana-stat-v">{SUBJ.filter(s=>s['Topics Done']>0).length}</div><div className="ana-stat-l">Subjects Started</div></div>
-                    <div className="ana-stat"><div className="ana-stat-v">{achievements.completedCount}</div><div className="ana-stat-l">Topics Completed</div></div>
+                  <div className="card-t-row">
+                    <div className="card-t"><i className="fa-solid fa-chart-simple" /> {t('p_learning_analytics')}</div>
+                    <button className="btn-t btn-t-sm" onClick={resumeLearning}>
+                      <i className={`fa-solid ${resumeTarget ? 'fa-play' : 'fa-book-open'}`} />
+                      {resumeTarget ? t('p_continue_learning') : t('p_go_to_assignments')}
+                    </button>
                   </div>
-                  <div className="sec-divider" style={{marginTop:'22px'}}>Achievements</div>
+                  <div className="ana-stats-g">
+                    <div className="ana-stat"><div className="ana-stat-v">{achievements.totalAttempted}</div><div className="ana-stat-l">{t('p_questions_attempted')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#4ade80'}}>{achievements.totalCorrect}</div><div className="ana-stat-l">{t('p_correct_answers')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'#f87171'}}>{achievements.totalAttempted-achievements.totalCorrect}</div><div className="ana-stat-l">{t('p_incorrect_answers')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{color:'var(--teal)'}}>{achievements.accuracy}%</div><div className="ana-stat-l">{t('p_overall_accuracy')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v">{SUBJ.filter(s=>s['Topics Done']>0).length}</div><div className="ana-stat-l">{t('p_subjects_started')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v">{SUBJ.filter(s=>s['Total Topics']>0 && s['Topics Done']===s['Total Topics']).length}</div><div className="ana-stat-l">{t('p_subjects_completed')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v">{achievements.completedCount}</div><div className="ana-stat-l">{t('p_topics_completed')}</div></div>
+                    <div className="ana-stat"><div className="ana-stat-v" style={{fontSize:'15px'}}>{achievements.lastActivityAt ? new Date(achievements.lastActivityAt).toLocaleDateString(lang==='da'?'da-DK':'en-IN',{day:'numeric',month:'short',year:'numeric'}) : t('p_no_activity_yet')}</div><div className="ana-stat-l">{t('p_last_activity')}</div></div>
+                  </div>
+                  <div className="sec-divider" style={{marginTop:'22px'}}>{t('p_achievements')}</div>
                   {achievements.badges.length ? (
                     <div className="badge-grid">
                       {achievements.badges.map(b=>(
@@ -1433,15 +1605,30 @@ export default function Portal() {
                       ))}
                     </div>
                   ) : (
-                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'14px 0'}}>Complete a few topics to start earning achievements!</div>
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'14px 0'}}>{t('p_no_achievements')}</div>
                   )}
                 </div>
+
+                <div className="sr">
+                  {!cfgReady ? [1,2,3,4].map(i=><div key={i} className="sc"><SK h="60px" /></div>)
+                  : statCards.map((s,i) => (
+                    <div key={i} className="sc">
+                      <div className="sc-l">{s.Label}</div>
+                      <div className="sc-v" style={s['Metric Key']==='pending_tasks'?{color:'#f97316'}:{}}>{s.Value}</div>
+                      <div className="sc-s">{s['Sub-label']}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="cr">
+                  <div className="card"><div className="card-t"><i className="fa-solid fa-chart-bar" /> {t('p_subject_progress')}</div><div className="cv"><canvas id="subjectChart" /></div></div>
+                  <div className="card"><div className="card-t"><i className="fa-solid fa-circle-half-stroke" /> {t('p_performance_ratios')}</div><div className="cv"><canvas id="ratioChart" /></div></div>
+                </div>
                 <div className="card">
-                  <div className="card-t"><i className="fa-solid fa-clock" /> Next {nextN} Classes</div>
+                  <div className="card-t"><i className="fa-solid fa-clock" /> {t('p_next_classes', {n: nextN})}</div>
                   {SCHED.slice(0,nextN).map((u,i)=>(
                     <div key={i} className="sch-item">
                       <div className="sch-color" style={{background:u['Color (Hex)']}} />
-                      <div className="sch-body"><div className="sch-subj">{u.Subject}</div><div className="sch-meta">{u.Teacher} · {u.Mode}</div></div>
+                      <div className="sch-body"><div className="sch-subj">{u.Subject}</div><div className="sch-meta">{u.Teacher} · {t(`sched_mode_${u.Mode.toLowerCase()}`)}</div></div>
                       <div className="sch-right"><div className="sch-time">{u.Time}</div><div className="sch-date">{u.Date}</div></div>
                     </div>
                   ))}
@@ -1451,28 +1638,28 @@ export default function Portal() {
 
             {/* ACADEMIC PROGRESS */}
             {tab==='progress' && (<>
-              <div className="main-top"><div><div className="pg-h">Academic Progress</div><div className="pg-s">Subject-wise completion and performance metrics.</div></div></div>
+              <div className="main-top"><div><div className="pg-h">{t('p_progress_title')}</div><div className="pg-s">{t('p_progress_subtitle')}</div></div></div>
               <div className="content">
                 <div className="cr" style={{marginBottom:'22px'}}>
-                  <div className="card"><div className="card-t"><i className="fa-solid fa-chart-bar" /> Completion by Subject</div><div className="cv"><canvas id="subjectChart" /></div></div>
-                  <div className="card"><div className="card-t"><i className="fa-solid fa-circle-half-stroke" /> Overall Ratios</div><div className="cv"><canvas id="ratioChart" /></div></div>
+                  <div className="card"><div className="card-t"><i className="fa-solid fa-chart-bar" /> {t('p_completion_by_subject')}</div><div className="cv"><canvas id="subjectChart" /></div></div>
+                  <div className="card"><div className="card-t"><i className="fa-solid fa-circle-half-stroke" /> {t('p_overall_ratios')}</div><div className="cv"><canvas id="ratioChart" /></div></div>
                 </div>
                 <div className="card">
-                  <div className="card-t"><i className="fa-solid fa-list-check" /> Detailed Progress</div>
+                  <div className="card-t"><i className="fa-solid fa-list-check" /> {t('p_detailed_progress')}</div>
                   {!SUBJ.length ? (
-                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>No subjects configured yet — check back once your teacher adds one!</div>
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>{t('p_no_subjects_yet')}</div>
                   ) : SUBJ.map(s=>(
                     <div key={s.Subject} className="sp-item">
                       <div className="sp-hd">
                         <span className="sp-name">{s.Subject}</span>
-                        <span className="sp-meta">{s['Topics Done']} / {s['Total Topics']} topics · <span style={{color:s['Color (Hex)'],fontWeight:700}}>{s['Progress %']}%</span></span>
+                        <span className="sp-meta">{s['Topics Done']} / {s['Total Topics']} {t('p_topics')} · <span style={{color:s['Color (Hex)'],fontWeight:700}}>{s['Progress %']}%</span></span>
                       </div>
                       <div className="sp-bar"><div className="sp-fill" style={{width:`${s['Progress %']}%`,background:s['Color (Hex)']}} /></div>
                       <div className="sp-detail-row">
-                        <span><i className="fa-solid fa-circle-check" style={{color:'#4ade80'}} /> {s.QuestionsCorrect} correct</span>
-                        <span><i className="fa-solid fa-circle-xmark" style={{color:'#f87171'}} /> {s.QuestionsIncorrect} incorrect</span>
-                        <span><i className="fa-solid fa-list-ol" /> {s.QuestionsAttempted} attempted</span>
-                        <span><i className="fa-solid fa-calendar" /> Last attempt: {s.LastAttemptDate}</span>
+                        <span><i className="fa-solid fa-circle-check" style={{color:'#4ade80'}} /> {s.QuestionsCorrect} {t('p_correct')}</span>
+                        <span><i className="fa-solid fa-circle-xmark" style={{color:'#f87171'}} /> {s.QuestionsIncorrect} {t('p_incorrect')}</span>
+                        <span><i className="fa-solid fa-list-ol" /> {s.QuestionsAttempted} {t('p_attempted')}</span>
+                        <span><i className="fa-solid fa-calendar" /> {t('p_last_attempt')} {s.LastAttemptDate}</span>
                       </div>
                     </div>
                   ))}
@@ -1482,14 +1669,14 @@ export default function Portal() {
 
             {/* LEADERBOARD */}
             {tab==='leaderboard' && (<>
-              <div className="main-top"><div><div className="pg-h">Leaderboard</div><div className="pg-s">See how you stack up against other students.</div></div></div>
+              <div className="main-top"><div><div className="pg-h">{t('p_leaderboard_title')}</div><div className="pg-s">{t('p_leaderboard_subtitle')}</div></div></div>
               <div className="content">
                 <div className="card" style={{marginBottom:'22px'}}>
-                  <div className="card-t"><i className="fa-solid fa-trophy" /> Overall Ranking</div>
+                  <div className="card-t"><i className="fa-solid fa-trophy" /> {t('p_overall_ranking')}</div>
                   {leaderboardLoading ? (
                     <>{[1,2,3].map(i=><div key={i} style={{marginBottom:'10px'}}><SK h="44px" /></div>)}</>
                   ) : !leaderboard.overall.length ? (
-                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>No leaderboard data yet — be the first to answer some questions!</div>
+                    <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>{t('p_no_leaderboard')}</div>
                   ) : (
                     <div className="lb-list">
                       {leaderboard.overall.slice(0,20).map((row,i)=>{
@@ -1498,8 +1685,8 @@ export default function Portal() {
                         return (
                           <div key={row.studentId} className={`lb-row${isMe?' me':''}`}>
                             <div className={`lb-rank${rank<=3?` top${rank}`:''}`}>{rank<=3 ? <i className="fa-solid fa-trophy" /> : rank}</div>
-                            <div className="lb-name">{row.studentName}{isMe && <span className="lb-you"> (You)</span>}</div>
-                            <div className="lb-stats"><span className="lb-correct">{row.correct} correct</span><span className="lb-acc">{row.accuracy}% accuracy</span></div>
+                            <div className="lb-name">{row.studentName}{isMe && <span className="lb-you">{t('p_you_suffix')}</span>}</div>
+                            <div className="lb-stats"><span className="lb-correct">{row.correct} {t('p_correct')}</span><span className="lb-acc">{row.accuracy}% {t('p_accuracy')}</span></div>
                           </div>
                         );
                       })}
@@ -1507,35 +1694,41 @@ export default function Portal() {
                   )}
                 </div>
 
-                <div className="sec-divider" style={{marginTop:0}}>Subject-Wise Champions</div>
+                <div className="sec-divider" style={{marginTop:0}}>{t('p_subject_champions')}</div>
                 {leaderboardLoading ? (
                   <div className="card"><SK h="80px" /></div>
                 ) : !Object.keys(leaderboard.bySubject).length ? (
-                  <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>No subject rankings yet.</div>
+                  <div className="card" style={{textAlign:'center',color:'var(--muted)',fontSize:'13px'}}>{t('p_no_subject_rankings')}</div>
                 ) : (
                   <div className="lb-subj-grid">
                     {Object.entries(leaderboard.bySubject).map(([subject, rows]) => {
                       const champ = rows[0];
-                      const subjMeta = ASGN_SUBJ.find(s=>s.Subject===subject);
+                      // `subject` here is whatever the backend recorded — always the canonical
+                      // English name now (see LearningModulePlayer's onAnswer call), regardless
+                      // of which language the student answered in. Match against SubjectEN so
+                      // the icon/color resolve correctly, but fall back to matching Subject
+                      // directly for any older records that might predate this fix.
+                      const subjMeta = ASGN_SUBJ.find(s=>s.SubjectEN===subject) || ASGN_SUBJ.find(s=>s.Subject===subject);
+                      const subjectDisplay = subjMeta?.Subject || subject;
                       return (
                         <div key={subject} className="card lb-subj-card">
-                          <div className="card-t"><i className={`fa-solid ${subjMeta?.['Icon (FontAwesome solid)']||'fa-medal'}`} style={{color:subjMeta?.['Color (Hex)']}} /> {subject} Champion</div>
+                          <div className="card-t"><i className={`fa-solid ${subjMeta?.['Icon (FontAwesome solid)']||'fa-medal'}`} style={{color:subjMeta?.['Color (Hex)']}} /> {subjectDisplay} {t('p_champion')}</div>
                           {champ ? (
                             <>
                               <div className="lb-champ-name">{champ.studentName}</div>
-                              <div className="lb-champ-stats">{champ.correct} correct · {champ.accuracy}% accuracy</div>
+                              <div className="lb-champ-stats">{champ.correct} {t('p_correct')} · {champ.accuracy}% {t('p_accuracy')}</div>
                               {rows.length>1 && (
                                 <div className="lb-runner-ups">
                                   {rows.slice(1,4).map((r,i)=>(
                                     <div key={r.studentId} className="lb-runner-row">
-                                      <span>{i+2}. {r.studentName}{r.studentId===profile.id?' (You)':''}</span>
-                                      <span>{r.correct} correct</span>
+                                      <span>{i+2}. {r.studentName}{r.studentId===profile.id?t('p_you_suffix'):''}</span>
+                                      <span>{r.correct} {t('p_correct')}</span>
                                     </div>
                                   ))}
                                 </div>
                               )}
                             </>
-                          ) : <div style={{color:'var(--muted)',fontSize:'13px'}}>No attempts yet.</div>}
+                          ) : <div style={{color:'var(--muted)',fontSize:'13px'}}>{t('p_no_attempts_yet')}</div>}
                         </div>
                       );
                     })}
@@ -1546,7 +1739,7 @@ export default function Portal() {
 
             {/* ATTENDANCE */}
             {tab==='attendance' && (<>
-              <div className="main-top"><div><div className="pg-h">Attendance</div><div className="pg-s">Track your class attendance and monthly trends.</div></div></div>
+              <div className="main-top"><div><div className="pg-h">{t('p_attendance_title')}</div><div className="pg-s">{t('p_attendance_subtitle')}</div></div></div>
               <div className="content">
                 <div className="att-g">
                   {ASTAT.map((a,i)=>{
@@ -1555,11 +1748,11 @@ export default function Portal() {
                   })}
                 </div>
                 <div className="card" style={{marginBottom:'22px'}}>
-                  <div className="card-t"><i className="fa-solid fa-chart-line" /> Monthly Attendance Trend</div>
+                  <div className="card-t"><i className="fa-solid fa-chart-line" /> {t('p_monthly_attendance_trend')}</div>
                   <div className="cv"><canvas id="attendChart" /></div>
                 </div>
                 <div className="card">
-                  <div className="card-t"><i className="fa-solid fa-calendar" /> Month-by-Month Breakdown</div>
+                  <div className="card-t"><i className="fa-solid fa-calendar" /> {t('p_month_breakdown')}</div>
                   <div className="month-g">
                     {AMON.map(m=>(
                       <div key={m['Month Short']} className="m-bar-wrap">
@@ -1592,12 +1785,12 @@ export default function Portal() {
             {tab==='assignments' && (<>
               {/* STEP 1 — Subject selection (the section's home view) */}
               {!activeAssignmentSubject && (
-                <div className="main-top"><div><div className="pg-h">Learning &amp; Assignments</div><div className="pg-s">Choose a subject to start your guided lesson, or view your homework below.</div></div></div>
+                <div className="main-top"><div><div className="pg-h">{t('p_assignments_title')}</div><div className="pg-s">{t('p_assignments_subtitle')}</div></div></div>
               )}
               {/* STEP 2 / 3 — breadcrumb once a subject (and maybe a topic) is selected */}
               {activeAssignmentSubject && (
                 <div className="asgn-breadcrumb">
-                  <span className="asgn-crumb" onClick={()=>{setActiveAssignmentSubject(null);setActiveModuleId(null);}}>Assignments</span>
+                  <span className="asgn-crumb" onClick={()=>{setActiveAssignmentSubject(null);setActiveModuleId(null);}}>{t('p_breadcrumb_assignments')}</span>
                   <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
                   {activeModuleId ? (
                     <>
@@ -1614,25 +1807,25 @@ export default function Portal() {
               {!activeAssignmentSubject ? (
                 /* ── STEP 1: Subject grid + Homework (unchanged section) ── */
                 <div className="content">
-                  <div className="sec-divider" style={{marginTop:0}}>Choose a Subject</div>
-                  <AssignmentSubjectsGrid subjects={ASGN_SUBJ} statsFor={subjectStats} onOpen={setActiveAssignmentSubject} />
+                  <div className="sec-divider" style={{marginTop:0}}>{t('p_choose_subject')}</div>
+                  <AssignmentSubjectsGrid subjects={ASGN_SUBJ} statsFor={subjectStats} onOpen={setActiveAssignmentSubject} t={t} />
 
-                  <div className="sec-divider">Homework &amp; Submissions</div>
+                  <div className="sec-divider">{t('p_homework_submissions')}</div>
                   <div className="card" style={{marginBottom:'22px'}}>
-                    <div className="card-t"><i className="fa-solid fa-list" /> All Assignments</div>
+                    <div className="card-t"><i className="fa-solid fa-list" /> {t('p_all_assignments')}</div>
                     {ASGN.map(a=>(
                       <div key={a['Assignment ID']} className="asgn-item">
                         <div className="asgn-dot" style={{background:a['Color (Hex)']}} />
                         <div className="asgn-body">
                           <div className="asgn-title">{a.Title}</div>
-                          <div className="asgn-meta">{a.Subject} · Due: {a['Due Date']}{a.Grade?` · Grade: ${a.Grade}`:''}</div>
+                          <div className="asgn-meta">{a.Subject} · {t('p_due')} {a['Due Date']}{a.Grade?` · ${t('p_grade')} ${a.Grade}`:''}</div>
                         </div>
-                        <span className={`asgn-badge ${a.Status}`}>{a.Status==='graded'?`✓ ${a.Grade||'Graded'}`:a.Status}</span>
+                        <span className={`asgn-badge ${a.Status}`}>{a.Status==='graded'?`✓ ${a.Grade||t('p_status_graded')}`:t(`p_status_${a.Status}`)}</span>
                       </div>
                     ))}
                   </div>
                   <div className="card">
-                    <div className="card-t"><i className="fa-solid fa-cloud-arrow-up" /> Submit Homework</div>
+                    <div className="card-t"><i className="fa-solid fa-cloud-arrow-up" /> {t('p_submit_homework')}</div>
                     <label className="upload-zone" htmlFor="hwFile">
                       <div style={{fontSize:'30px',color:'var(--muted)',marginBottom:'10px'}}><i className="fa-solid fa-cloud-arrow-up" /></div>
                       <p style={{fontSize:'14px',color:'rgba(255,255,255,.6)',marginBottom:'6px'}}>{S.UploadZonePrimary}</p>
@@ -1642,7 +1835,7 @@ export default function Portal() {
                     {uploadName && <p style={{fontSize:'13px',color:'var(--teal)',marginTop:'12px',fontWeight:600}}><i className="fa-solid fa-paperclip" /> {uploadName}</p>}
                     <div style={{textAlign:'center',marginTop:'16px'}}>
                       <button className="btn-t" onClick={()=>{ if(!uploadName){alert(S.UploadValidationError);return;} setUploadDone(true); }}>
-                        <i className="fa-solid fa-paper-plane" /> Submit Assignment
+                        <i className="fa-solid fa-paper-plane" /> {t('p_submit_assignment')}
                       </button>
                     </div>
                     {uploadDone && <div style={{background:'rgba(34,197,94,.1)',border:'1px solid rgba(34,197,94,.2)',color:'#4ade80',borderRadius:'10px',padding:'13px',fontSize:'13px',fontWeight:600,marginTop:'14px',textAlign:'center'}}>✅ {uploadMsg}</div>}
@@ -1651,9 +1844,9 @@ export default function Portal() {
               ) : !activeModuleId ? (
                 /* ── STEP 2: Topic grid, filtered to the chosen subject ── */
                 <div className="content">
-                  <button className="lp-back" onClick={()=>setActiveAssignmentSubject(null)}><i className="fa-solid fa-arrow-left" /> Back to Subjects</button>
-                  <div className="sec-divider" style={{marginTop:0}}>{activeAssignmentSubject} Topics</div>
-                  <LearningModulesGrid modules={topicsForSubject(activeAssignmentSubject)} stepsFor={stepsFor} progressMap={learnProgress} onOpen={setActiveModuleId} />
+                  <button className="lp-back" onClick={()=>setActiveAssignmentSubject(null)}><i className="fa-solid fa-arrow-left" /> {t('p_back_to_subjects')}</button>
+                  <div className="sec-divider" style={{marginTop:0}}>{activeAssignmentSubject} {t('p_topics_suffix')}</div>
+                  <LearningModulesGrid modules={topicsForSubject(activeAssignmentSubject)} stepsFor={stepsFor} progressMap={learnProgress} onOpen={setActiveModuleId} t={t} />
                 </div>
               ) : (
                 /* ── STEP 3: Introduction → Progressive Learning → Completion ── */
@@ -1664,7 +1857,8 @@ export default function Portal() {
                   onSave={patch=>saveLearnProgress(activeModuleId, patch)}
                   onAnswer={recordAnswer}
                   onExit={()=>setActiveModuleId(null)}
-                  backLabel={`Back to ${activeAssignmentSubject} Topics`}
+                  backLabel={`${t('p_back_to')} ${activeAssignmentSubject} ${t('p_topics_suffix')}`}
+                  t={t}
                 />
               )}
             </>)}
@@ -1672,10 +1866,10 @@ export default function Portal() {
 
             {/* SCHEDULE */}
             {tab==='schedule' && (<>
-              <div className="main-top"><div><div className="pg-h">Upcoming Classes</div><div className="pg-s">Your scheduled sessions for the coming days.</div></div></div>
+              <div className="main-top"><div><div className="pg-h">{t('p_schedule_title')}</div><div className="pg-s">{t('p_schedule_subtitle')}</div></div></div>
               <div className="content">
                 <div className="card">
-                  <div className="card-t"><i className="fa-solid fa-calendar-days" /> Schedule</div>
+                  <div className="card-t"><i className="fa-solid fa-calendar-days" /> {t('p_schedule_card_title')}</div>
                   {SCHED.map((u,i)=>(
                     <div key={i} className="sch-item">
                       <div className="sch-color" style={{background:u['Color (Hex)']}} />
@@ -1684,7 +1878,7 @@ export default function Portal() {
                         <div className="sch-time">{u.Time}</div><div className="sch-date">{u.Date}</div>
                         <span style={{fontSize:'10px',fontWeight:700,padding:'2px 8px',borderRadius:'100px',marginTop:4,display:'inline-block',
                           background:u.Mode==='Physical'?'rgba(34,197,94,.12)':u.Mode==='Online'?'rgba(59,130,246,.12)':'rgba(168,85,247,.12)',
-                          color:u.Mode==='Physical'?'#4ade80':u.Mode==='Online'?'#60a5fa':'#c084fc'}}>{u.Mode}</span>
+                          color:u.Mode==='Physical'?'#4ade80':u.Mode==='Online'?'#60a5fa':'#c084fc'}}>{t(`sched_mode_${u.Mode.toLowerCase()}`)}</span>
                       </div>
                     </div>
                   ))}
@@ -1695,8 +1889,8 @@ export default function Portal() {
             {/* NOTIFICATIONS */}
             {tab==='notifications' && (<>
               <div className="main-top">
-                <div><div className="pg-h">Notifications</div><div className="pg-s">{unreadCount} unread message{unreadCount!==1?'s':''}.</div></div>
-                {unreadCount>0 && <button className="btn-outline" onClick={()=>setNotifs(n=>n.map(x=>({...x,Unread:false})))}><i className="fa-solid fa-check-double" /> Mark all read</button>}
+                <div><div className="pg-h">{t('p_notifications_title')}</div><div className="pg-s">{unreadCount} {unreadCount===1?t('p_unread_messages_one'):t('p_unread_messages_many')}</div></div>
+                {unreadCount>0 && <button className="btn-outline" onClick={()=>setNotifs(n=>n.map(x=>({...x,Unread:false})))}><i className="fa-solid fa-check-double" /> {t('p_mark_all_read')}</button>}
               </div>
               <div className="content">
                 <div className="card">
@@ -1721,8 +1915,8 @@ export default function Portal() {
             {/* PROFILE */}
             {tab==='profile' && (<>
               <div className="main-top">
-                <div><div className="pg-h">My Profile</div><div className="pg-s">Manage your account details and preferences.</div></div>
-                <button className="btn-outline" onClick={()=>setProfileEdit(!profileEdit)}><i className={`fa-solid ${profileEdit?'fa-xmark':'fa-pen'}`} /> {profileEdit?'Cancel':'Edit Profile'}</button>
+                <div><div className="pg-h">{t('p_profile_title')}</div><div className="pg-s">{t('p_profile_subtitle')}</div></div>
+                <button className="btn-outline" onClick={()=>setProfileEdit(!profileEdit)}><i className={`fa-solid ${profileEdit?'fa-xmark':'fa-pen'}`} /> {profileEdit?t('p_cancel'):t('p_edit_profile')}</button>
               </div>
               <div className="content">
                 <div className="card" style={{marginBottom:'20px'}}>
@@ -1734,11 +1928,11 @@ export default function Portal() {
                       <div style={{fontFamily:'var(--fd)',fontSize:'22px',fontWeight:900,color:'#fff',marginBottom:'4px'}}>{profile.name}</div>
                       <div style={{fontSize:'13px',color:'var(--muted)',marginBottom:'6px'}}>{profile.id} · {profile.classLevel}</div>
                       <div style={{display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'12px',fontWeight:700,padding:'4px 12px',borderRadius:'100px',background:'rgba(0,198,167,.1)',color:'var(--teal)',border:'1px solid rgba(0,198,167,.2)'}}>
-                        <i className="fa-solid fa-circle" style={{fontSize:'8px'}} /> {S.EnrolmentStatus} Student
+                        <i className="fa-solid fa-circle" style={{fontSize:'8px'}} /> {S.EnrolmentStatus} {t('p_student_suffix')}
                       </div>
                     </div>
                   </div>
-                  <div className="card-t"><i className="fa-solid fa-id-card" /> Account Details</div>
+                  <div className="card-t"><i className="fa-solid fa-id-card" /> {t('p_account_details')}</div>
                   <div className="prof-g">
                     {mergedProfile.map((f,i)=>(
                       <div key={i} className="prof-field">
@@ -1749,16 +1943,16 @@ export default function Portal() {
                       </div>
                     ))}
                   </div>
-                  {profileEdit && <div style={{marginTop:'24px'}}><button className="btn-t" onClick={()=>setProfileEdit(false)}><i className="fa-solid fa-check" /> Save Changes</button></div>}
+                  {profileEdit && <div style={{marginTop:'24px'}}><button className="btn-t" onClick={()=>setProfileEdit(false)}><i className="fa-solid fa-check" /> {t('p_save_changes')}</button></div>}
                 </div>
                 <div className="card">
-                  <div className="card-t"><i className="fa-solid fa-lock" /> Change Password</div>
+                  <div className="card-t"><i className="fa-solid fa-lock" /> {t('p_change_password')}</div>
                   <div className="prof-g">
-                    <div className="prof-field"><span className="prof-label">Current Password</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
-                    <div className="prof-field"><span className="prof-label">New Password</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
-                    <div className="prof-field"><span className="prof-label">Confirm Password</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
+                    <div className="prof-field"><span className="prof-label">{t('p_current_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
+                    <div className="prof-field"><span className="prof-label">{t('p_new_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
+                    <div className="prof-field"><span className="prof-label">{t('p_confirm_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
                   </div>
-                  <div style={{marginTop:'20px'}}><button className="btn-t"><i className="fa-solid fa-key" /> Update Password</button></div>
+                  <div style={{marginTop:'20px'}}><button className="btn-t"><i className="fa-solid fa-key" /> {t('p_update_password')}</button></div>
                 </div>
               </div>
             </>)}
@@ -1769,3 +1963,12 @@ export default function Portal() {
     </>
   );
 }
+
+export default function Portal() {
+  return (
+    <LanguageProvider>
+      <PortalInner />
+    </LanguageProvider>
+  );
+}
+

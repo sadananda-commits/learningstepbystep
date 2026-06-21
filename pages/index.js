@@ -1,6 +1,8 @@
 import Head from 'next/head';
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
+import { LanguageProvider, useLanguage, LanguageToggle } from '../lib/i18n';
+import LANDING_FALLBACK_DA from '../lib/landingContentDA';
 
 /* ─────────────────────────────────────────────────────────────────────────────
    FALLBACK DATA
@@ -69,6 +71,8 @@ const FALLBACK = {
   hero: {
     badge:      'CBSE Certified · KG to Class 5',
     headline:   "Where every child's potential is unlocked",
+    headlineLine1: "Where every child's",
+    headlineLine2: 'potential is unlocked',
     subheadline:'Premium, personalised CBSE home tuition with expert mentors, micro-batches of 5, and a real-time student portal to track every step of your child\'s growth.',
     btn1Text:   'Enroll Now — Free',
     btn1Link:   '#enroll',
@@ -85,19 +89,53 @@ const FALLBACK = {
   },
 };
 
-export default function Home() {
-  const [cms, setCms] = useState(FALLBACK);
+function HomeInner() {
+  const { lang, t } = useLanguage();
+  // Canonical English subject names (as recorded by the backend/leaderboard,
+  // see pages/portal.js's onAnswer call) mapped to their Danish display
+  // names, for showing translated subject names next to backend-supplied
+  // data on the public stats section. Falls back to the raw English name
+  // for any subject without a Danish mapping yet.
+  const SUBJECT_DISPLAY_DA = {
+    'Science': 'Naturfag', 'Mathematics': 'Matematik', 'English Grammar': 'English Grammar',
+    'Social Studies': 'Samfundsfag', 'General Knowledge': 'Almen Viden',
+  };
+  const subjectDisplay = (name) => lang === 'da' ? (SUBJECT_DISPLAY_DA[name] || name) : name;
+  // The live Google Sheet behind /api/content is English-only content
+  // (teachers edit it in English) — it has no Danish column today. So:
+  //  - English: fetch and prefer live Sheet data, same as before.
+  //  - Danish: use the hand-translated LANDING_FALLBACK_DA dataset and
+  //    skip the Sheet fetch overwrite entirely, so Danish text is never
+  //    silently replaced by English Sheet content.
+  // See the README note added during this Danish-language rollout for how
+  // to extend the Sheet itself with Danish columns later if desired.
+  const baseFallback = lang === 'da' ? LANDING_FALLBACK_DA : FALLBACK;
+  const [cms, setCms] = useState(baseFallback);
   // Public-site mobile nav: the hamburger button existed in markup already
   // but had no handler and no menu to open — .nav-links simply vanishes
   // below 900px with no way to reach Classes/Subjects/Schedule/etc. on a
   // phone. Same off-canvas-drawer fix as the Student Portal's sidebar.
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  // ── Fetch live data from Google Sheet via /api/content ──────────────────
+  // Whenever the language changes, immediately reset cms to that language's
+  // fallback so the UI never shows a mix of English Sheet data and Danish
+  // static text (or vice versa) while a fetch is in flight.
   useEffect(() => {
+    setCms(lang === 'da' ? LANDING_FALLBACK_DA : FALLBACK);
+  }, [lang]);
+
+  // ── Fetch live data from Google Sheet via /api/content ──────────────────
+  // Only fetched/applied in English — see note above.
+  useEffect(() => {
+    if (lang !== 'en') return;
+    let cancelled = false;
     fetch('/api/content')
       .then(r => r.json())
       .then(data => {
+        // Guard against a race: if the user switched language away and back
+        // while this fetch was in flight, a stale response must never
+        // overwrite cms after a newer effect run already took over.
+        if (cancelled) return;
         // Accept data from sheet OR stale cache — only skip if explicit fallback with no real data
         if (data.source === 'fallback' && !data.hero && !data.classes) {
           console.warn('[cms] Using hardcoded fallback — sheet unavailable:', data.error);
@@ -116,8 +154,9 @@ export default function Home() {
           contact:      Object.keys(data.contact || {}).length ? data.contact      : FALLBACK.contact,
         });
       })
-      .catch(err => console.warn('[cms] Fetch error, using fallback:', err.message));
-  }, []);
+      .catch(err => { if (!cancelled) console.warn('[cms] Fetch error, using fallback:', err.message); });
+    return () => { cancelled = true; };
+  }, [lang]);
 
   // ── Portal Dashboard (Req #8): live aggregate stats from /api/portal-stats,
   // a separate public endpoint backed by the same Apps Script as the student
@@ -132,6 +171,13 @@ export default function Home() {
       .then(data => setPortalStats(data))
       .catch(err => { console.warn('[portal-stats] Fetch error:', err.message); setPortalStats(false); });
   }, []);
+
+  // ── Top Students leaderboard table (Req #7): sortable + paginated client-side
+  // from the ranked list /api/portal-stats already returns (already sorted by
+  // rank/correct server-side, so 'rank' sort is just the original order).
+  const [lbSort, setLbSort] = useState('rank'); // 'rank' | 'attempted' | 'accuracy'
+  const [lbPage, setLbPage] = useState(0);
+  const LB_PAGE_SIZE = 10;
 
   const [formStatus, setFormStatus] = useState({ state: 'idle', studentId: '', username: '', tempPassword: '' });
   const [openFaq, setOpenFaq]       = useState(null);
@@ -182,10 +228,10 @@ export default function Home() {
         setFormData({ studentName:'', dob:'', gender:'', schoolName:'', classLevel:'', parentName:'', email:'', phone:'', emergencyContact:'', address:'', teacherId:'', timeSlot:'', learningMode:'', subjects:[] });
         setStep(1);
       } else {
-        setFormStatus({ state: 'error', message: data.message || 'Something went wrong.', studentId: '', username: '', tempPassword: '' });
+        setFormStatus({ state: 'error', message: data.message || t('f_generic_error'), studentId: '', username: '', tempPassword: '' });
       }
     } catch {
-      setFormStatus({ state: 'error', message: 'Connection failed. Is the server running?', studentId: '', username: '', tempPassword: '' });
+      setFormStatus({ state: 'error', message: t('f_connection_failed'), studentId: '', username: '', tempPassword: '' });
     }
   };
 
@@ -193,11 +239,32 @@ export default function Home() {
   const h = cms.hero;
   const c = cms.contact;
 
+  // Derive the table's row data once per render from the raw ranked list.
+  // `attempted` isn't guaranteed present on every backend row (see the
+  // comment on /api/portal-stats) — prefer it when present, otherwise
+  // derive an approximate count from correct/accuracy so the column never
+  // shows blank, just possibly-rounded.
+  const lbRawRows = portalStats?.leaderboardOverall || [];
+  const lbRows = lbRawRows.map((row, i) => {
+    const attempted = typeof row.attempted === 'number'
+      ? row.attempted
+      : (row.accuracy ? Math.round((row.correct || 0) / (row.accuracy / 100)) : (row.correct || 0));
+    return { ...row, attempted, rank: i + 1 };
+  });
+  const lbSorted = [...lbRows].sort((a, b) => {
+    if (lbSort === 'attempted') return b.attempted - a.attempted;
+    if (lbSort === 'accuracy') return (b.accuracy || 0) - (a.accuracy || 0);
+    return a.rank - b.rank;
+  });
+  const lbPageCount = Math.max(1, Math.ceil(lbSorted.length / LB_PAGE_SIZE));
+  const lbPageClamped = Math.min(lbPage, lbPageCount - 1);
+  const lbPageRows = lbSorted.slice(lbPageClamped * LB_PAGE_SIZE, lbPageClamped * LB_PAGE_SIZE + LB_PAGE_SIZE);
+
   return (
     <>
       <Head>
-        <title>ApexCBSE Academy | Expert Home Tuition KG – Class 5</title>
-        <meta name="description" content="Premium CBSE home tuition. Micro-batches, real-time dashboards, expert mentors. Kindergarten to Class 5." />
+        <title>{t('page_title')}</title>
+        <meta name="description" content={t('page_meta_description')} />
         <style>{`
           *{box-sizing:border-box;margin:0;padding:0;}
           :root{
@@ -223,8 +290,8 @@ export default function Home() {
           .n-portal:hover{border-color:var(--teal);color:var(--teal);}
           .n-cta{background:var(--accent);color:var(--navy);font-weight:700;padding:8px 18px;border-radius:9px;font-size:13px;text-decoration:none;transition:all .2s;}
           .n-cta:hover{background:var(--accent-light);transform:translateY(-1px);}
-          .hm{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:8px;}
-          @media(max-width:900px){.nav-links{display:none;}.hm{display:block;}}
+          .hm{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:12px;width:44px;height:44px;align-items:center;justify-content:center;}
+          @media(max-width:900px){.nav-links{display:none;}.hm{display:flex;}}
           .mnav-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:290;opacity:0;pointer-events:none;transition:opacity .2s ease;}
           .mnav-drawer{display:none;position:fixed;top:0;right:0;bottom:0;width:80vw;max-width:320px;background:var(--navy);z-index:300;
             transform:translateX(100%);transition:transform .25s ease;box-shadow:0 0 40px rgba(0,0,0,.4);flex-direction:column;overflow-y:auto;}
@@ -288,7 +355,7 @@ export default function Home() {
           @media(max-width:720px){.why-g{grid-template-columns:1fr;}}
 
           /* PORTAL DASHBOARD */
-          .pd-stats-g{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:52px;}
+          .pd-stats-g{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:52px;}
           .pd-stat-c{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:var(--radius);padding:24px;text-align:center;transition:all .3s;}
           .pd-stat-c:hover{transform:translateY(-3px);background:rgba(255,255,255,.07);}
           .pd-stat-ic{width:42px;height:42px;border-radius:12px;background:rgba(0,198,167,.12);color:var(--teal);display:flex;align-items:center;justify-content:center;font-size:17px;margin:0 auto 14px;}
@@ -313,6 +380,35 @@ export default function Home() {
           .pd-activity-text strong{color:#fff;font-weight:700;}
           .pd-activity-subj{color:rgba(255,255,255,.4);}
           .pd-empty,.pd-error{text-align:center;color:rgba(255,255,255,.4);font-size:13px;padding:20px;background:rgba(255,255,255,.03);border-radius:12px;margin-top:30px;}
+
+          /* Top Students leaderboard table (Req #7) */
+          .pd-lb-section{margin-top:48px;}
+          .pd-lb-table-wrap{margin-top:18px;}
+          .pd-lb-table{width:100%;border-collapse:collapse;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:14px;overflow:hidden;}
+          .pd-lb-table thead{background:rgba(255,255,255,.04);}
+          .pd-lb-table th{text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.45);padding:13px 16px;}
+          .pd-lb-table td{padding:13px 16px;font-size:13.5px;color:rgba(255,255,255,.85);border-top:1px solid rgba(255,255,255,.06);}
+          .pd-lb-sort-btn{background:none;border:none;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:0;}
+          .pd-lb-sort-btn:hover{color:var(--teal);}
+          .pd-lb-rank{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.08);font-weight:800;font-size:12px;color:rgba(255,255,255,.7);}
+          .pd-lb-rank.top1{background:linear-gradient(135deg,#f5c518,#e0a800);color:#2b2200;}
+          .pd-lb-rank.top2{background:linear-gradient(135deg,#cfd8e3,#9aa7b5);color:#1a2330;}
+          .pd-lb-rank.top3{background:linear-gradient(135deg,#d99355,#b06a30);color:#2b1700;}
+          .pd-lb-name{font-weight:700;color:#fff;}
+          .pd-lb-acc-pill{display:inline-block;padding:3px 10px;border-radius:100px;background:rgba(0,198,167,.14);color:var(--teal);font-weight:700;font-size:12px;}
+          .pd-lb-cards{display:none;}
+          .pd-lb-card{display:flex;align-items:center;gap:13px;padding:13px 14px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:12px;margin-bottom:9px;}
+          .pd-lb-card-body{flex:1;min-width:0;}
+          .pd-lb-card-meta{font-size:12px;color:rgba(255,255,255,.5);margin-top:2px;}
+          .pd-lb-pagination{display:flex;align-items:center;justify-content:center;gap:16px;margin-top:18px;}
+          .pd-lb-page-btn{padding:9px 16px;font-size:12.5px;}
+          .pd-lb-page-btn:disabled{opacity:.35;cursor:not-allowed;}
+          .pd-lb-page-lbl{font-size:12.5px;color:rgba(255,255,255,.5);font-weight:600;}
+          @media(max-width:640px){
+            .pd-lb-table-wrap .pd-lb-table{display:none;}
+            .pd-lb-cards{display:block;}
+          }
+
           .pd-cta{margin-top:44px;padding-top:36px;border-top:1px solid rgba(255,255,255,.08);text-align:center;}
           .pd-cta p{font-size:14px;color:rgba(255,255,255,.6);margin-bottom:16px;}
           @media(max-width:900px){.pd-stats-g{grid-template-columns:1fr 1fr;}.pd-row{grid-template-columns:1fr;}}
@@ -477,17 +573,18 @@ export default function Home() {
             <span className="logo-txt">ApexCBSE</span>
           </a>
           <div className="nav-links">
-            <a href="#dashboard" className="nl">Dashboard</a>
-            <a href="#about"    className="nl">About</a>
-            <a href="#classes"  className="nl">Classes</a>
-            <a href="#subjects" className="nl">Subjects</a>
-            <a href="#schedule" className="nl">Schedule</a>
-            <a href="#fees"     className="nl">Fees</a>
-            <a href="#contact"  className="nl">Contact</a>
-            <a href="/portal"   className="n-portal"><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> Student Login</a>
-            <a href="#enroll"   className="n-cta">Enroll Now</a>
+            <a href="#dashboard" className="nl">{t('nav_dashboard')}</a>
+            <a href="#about"    className="nl">{t('nav_about')}</a>
+            <a href="#classes"  className="nl">{t('nav_classes')}</a>
+            <a href="#subjects" className="nl">{t('nav_subjects')}</a>
+            <a href="#schedule" className="nl">{t('nav_schedule')}</a>
+            <a href="#fees"     className="nl">{t('nav_fees')}</a>
+            <a href="#contact"  className="nl">{t('nav_contact')}</a>
+            <a href="/portal"   className="n-portal"><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+            <a href="#enroll"   className="n-cta">{t('nav_enroll_now')}</a>
+            <LanguageToggle style={{marginLeft:'4px'}} />
           </div>
-          <button className="hm" onClick={()=>setMobileNavOpen(true)} aria-label="Open menu"><i className="fa-solid fa-bars"></i></button>
+          <button className="hm" onClick={()=>setMobileNavOpen(true)} aria-label={t('nav_open_menu')}><i className="fa-solid fa-bars"></i></button>
         </div>
       </nav>
 
@@ -495,19 +592,20 @@ export default function Home() {
       <div className={`mnav-backdrop${mobileNavOpen?' open':''}`} onClick={()=>setMobileNavOpen(false)} />
       <div className={`mnav-drawer${mobileNavOpen?' open':''}`}>
         <div className="mnav-drawer-head">
-          <span className="logo-txt" style={{color:'#fff'}}>Menu</span>
-          <button className="mnav-drawer-close" onClick={()=>setMobileNavOpen(false)} aria-label="Close menu"><i className="fa-solid fa-xmark"></i></button>
+          <span className="logo-txt" style={{color:'#fff'}}>{t('nav_menu')}</span>
+          <button className="mnav-drawer-close" onClick={()=>setMobileNavOpen(false)} aria-label={t('nav_close_menu')}><i className="fa-solid fa-xmark"></i></button>
         </div>
         <div className="mnav-drawer-links">
-          <a href="#dashboard" className="nl" onClick={()=>setMobileNavOpen(false)}>Dashboard</a>
-          <a href="#about"    className="nl" onClick={()=>setMobileNavOpen(false)}>About</a>
-          <a href="#classes"  className="nl" onClick={()=>setMobileNavOpen(false)}>Classes</a>
-          <a href="#subjects" className="nl" onClick={()=>setMobileNavOpen(false)}>Subjects</a>
-          <a href="#schedule" className="nl" onClick={()=>setMobileNavOpen(false)}>Schedule</a>
-          <a href="#fees"     className="nl" onClick={()=>setMobileNavOpen(false)}>Fees</a>
-          <a href="#contact"  className="nl" onClick={()=>setMobileNavOpen(false)}>Contact</a>
-          <a href="/portal"   className="n-portal" style={{marginTop:'10px',textAlign:'center'}}><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> Student Login</a>
-          <a href="#enroll"   className="n-cta" style={{textAlign:'center',marginTop:'8px'}} onClick={()=>setMobileNavOpen(false)}>Enroll Now</a>
+          <div style={{padding:'0 0 12px'}}><LanguageToggle /></div>
+          <a href="#dashboard" className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_dashboard')}</a>
+          <a href="#about"    className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_about')}</a>
+          <a href="#classes"  className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_classes')}</a>
+          <a href="#subjects" className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_subjects')}</a>
+          <a href="#schedule" className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_schedule')}</a>
+          <a href="#fees"     className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_fees')}</a>
+          <a href="#contact"  className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_contact')}</a>
+          <a href="/portal"   className="n-portal" style={{marginTop:'10px',textAlign:'center'}}><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+          <a href="#enroll"   className="n-cta" style={{textAlign:'center',marginTop:'8px'}} onClick={()=>setMobileNavOpen(false)}>{t('nav_enroll_now')}</a>
         </div>
       </div>
 
@@ -517,7 +615,7 @@ export default function Home() {
         <div className="hero-in">
           <div>
             <div className="badge"><i className="fa-solid fa-circle-check" style={{fontSize:'10px'}}></i> {h.badge}</div>
-            <h1 className="h1">{h.headline?.split("'s")[0]}'s<br /><span>{h.headline?.split("'s")[1] || ''}</span></h1>
+            <h1 className="h1">{h.headlineLine1 || h.headline}<br /><span>{h.headlineLine2 || ''}</span></h1>
             <p className="hero-p">{h.subheadline}</p>
             <div className="hero-btns">
               <a href={h.btn1Link} className="btn btn-accent"><i className="fa-solid fa-user-plus"></i> {h.btn1Text}</a>
@@ -544,24 +642,26 @@ export default function Home() {
       {/* ── PORTAL DASHBOARD (live stats from the Student Portal) ── */}
       <section id="dashboard" className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Live From The Portal</p>
-          <h2 className="sec-h">Real students,<br/>real progress</h2>
-          <p className="sec-sub">Every number below updates automatically as students work through lessons in the Student Portal — nothing here is staged.</p>
+          <p className="sec-lbl">{t('pd_live_label')}</p>
+          <h2 className="sec-h">{t('pd_heading_1')}<br/>{t('pd_heading_2')}</h2>
+          <p className="sec-sub">{t('pd_sub')}</p>
 
           {portalStats === false ? (
-            <div className="pd-error">Live stats are temporarily unavailable — please check back shortly.</div>
+            <div className="pd-error">{t('pd_error')}</div>
           ) : (
             <>
               <div className="pd-stats-g">
                 {[
-                  { icon:'fa-user-graduate', label:'Total Students',        val: portalStats?.totalStudents },
-                  { icon:'fa-list-check',    label:'Questions Available',   val: portalStats?.totalQuestionsAvailable },
-                  { icon:'fa-pen',           label:'Questions Attempted',   val: portalStats?.totalQuestionsAttempted },
-                  { icon:'fa-circle-check',  label:'Correct Answers',       val: portalStats?.totalCorrectAnswers },
+                  { icon:'fa-user-graduate', label:t('pd_stat_total_students'),        val: portalStats?.totalStudents },
+                  { icon:'fa-book',          label:t('pd_stat_total_subjects'),        val: portalStats?.totalSubjectsAvailable },
+                  { icon:'fa-layer-group',   label:t('pd_stat_total_topics'),          val: portalStats?.totalTopicsAvailable },
+                  { icon:'fa-list-check',    label:t('pd_stat_questions_available'),   val: portalStats?.totalQuestionsAvailable },
+                  { icon:'fa-pen',           label:t('pd_stat_questions_attempted'),   val: portalStats?.totalQuestionsAttempted },
+                  { icon:'fa-circle-check',  label:t('pd_stat_correct_answers'),       val: portalStats?.totalCorrectAnswers },
                 ].map((s,i) => (
                   <div key={i} className="pd-stat-c">
                     <div className="pd-stat-ic"><i className={`fa-solid ${s.icon}`}></i></div>
-                    <div className="pd-stat-v">{portalStats ? (s.val ?? 0).toLocaleString('en-IN') : <span className="pd-skel" />}</div>
+                    <div className="pd-stat-v">{portalStats ? (s.val ?? 0).toLocaleString(lang==='da'?'da-DK':'en-IN') : <span className="pd-skel" />}</div>
                     <div className="pd-stat-l">{s.label}</div>
                   </div>
                 ))}
@@ -569,20 +669,20 @@ export default function Home() {
 
               <div className="pd-row">
                 <div className="pd-col">
-                  <p className="pd-sub-h"><i className="fa-solid fa-trophy"></i> Top Performers</p>
+                  <p className="pd-sub-h"><i className="fa-solid fa-trophy"></i> {t('pd_top_performers')}</p>
                   {!portalStats ? (
                     <div className="pd-champ-c"><div className="pd-skel" style={{height:'60px'}} /></div>
                   ) : !portalStats.topPerformers?.overall && !Object.keys(portalStats.topPerformers?.bySubject||{}).length ? (
-                    <div className="pd-empty">No champions yet — be the first!</div>
+                    <div className="pd-empty">{t('pd_no_champions')}</div>
                   ) : (
                     <div className="pd-champ-list">
                       {portalStats.topPerformers.overall && (
                         <div className="pd-champ-c pd-champ-overall">
                           <div className="pd-champ-ic"><i className="fa-solid fa-crown"></i></div>
                           <div>
-                            <div className="pd-champ-tag">Overall Champion</div>
+                            <div className="pd-champ-tag">{t('pd_overall_champion')}</div>
                             <div className="pd-champ-name">{portalStats.topPerformers.overall.studentName}</div>
-                            <div className="pd-champ-meta">{portalStats.topPerformers.overall.correct} correct · {portalStats.topPerformers.overall.accuracy}% accuracy</div>
+                            <div className="pd-champ-meta">{portalStats.topPerformers.overall.correct} {t('pd_correct_accuracy', {pct: portalStats.topPerformers.overall.accuracy})}</div>
                           </div>
                         </div>
                       )}
@@ -590,9 +690,9 @@ export default function Home() {
                         <div key={subject} className="pd-champ-c">
                           <div className="pd-champ-ic" style={{background:'rgba(245,166,35,.12)',color:'var(--accent)'}}><i className="fa-solid fa-medal"></i></div>
                           <div>
-                            <div className="pd-champ-tag">{subject} Champion</div>
+                            <div className="pd-champ-tag">{subjectDisplay(subject)} {t('pd_subject_champion')}</div>
                             <div className="pd-champ-name">{champ.studentName}</div>
-                            <div className="pd-champ-meta">{champ.correct} correct · {champ.accuracy}% accuracy</div>
+                            <div className="pd-champ-meta">{champ.correct} {t('pd_correct_accuracy', {pct: champ.accuracy})}</div>
                           </div>
                         </div>
                       ))}
@@ -601,18 +701,18 @@ export default function Home() {
                 </div>
 
                 <div className="pd-col">
-                  <p className="pd-sub-h"><i className="fa-solid fa-bolt"></i> Recent Activity</p>
+                  <p className="pd-sub-h"><i className="fa-solid fa-bolt"></i> {t('pd_recent_activity')}</p>
                   {!portalStats ? (
                     <div className="pd-champ-c"><div className="pd-skel" style={{height:'60px'}} /></div>
                   ) : !portalStats.recentActivity?.length ? (
-                    <div className="pd-empty">No recent activity yet.</div>
+                    <div className="pd-empty">{t('pd_no_recent_activity')}</div>
                   ) : (
                     <div className="pd-activity-list">
                       {portalStats.recentActivity.map((a,i) => (
                         <div key={i} className="pd-activity-row">
                           <div className="pd-activity-dot"></div>
                           <div className="pd-activity-text">
-                            <strong>{a.studentName}</strong> worked on <strong>{a.topic || a.subject}</strong>
+                            <strong>{a.studentName}</strong> {t('pd_worked_on')} <strong>{a.topic || a.subject}</strong>
                             {a.subject && a.topic ? <span className="pd-activity-subj"> · {a.subject}</span> : null}
                           </div>
                         </div>
@@ -624,19 +724,88 @@ export default function Home() {
             </>
           )}
 
+          {/* Top Students leaderboard table (Req #7) — separate from the
+              "Top Performers" summary above (which only shows the #1
+              student overall + per-subject); this is the full ranked list
+              with sorting and pagination. */}
+          {portalStats && lbRows.length > 0 && (
+            <div className="pd-lb-section">
+              <p className="pd-sub-h"><i className="fa-solid fa-ranking-star"></i> {t('pd_leaderboard_title')}</p>
+
+              {/* Desktop/tablet: real table. Mobile: stacked cards (CSS swaps
+                  display at the same breakpoint used elsewhere on this page). */}
+              <div className="pd-lb-table-wrap">
+                <table className="pd-lb-table">
+                  <thead>
+                    <tr>
+                      <th>{t('pd_lb_rank')}</th>
+                      <th>{t('pd_lb_student')}</th>
+                      <th>
+                        <button className="pd-lb-sort-btn" onClick={()=>{setLbSort('attempted');setLbPage(0);}} aria-label={t('pd_lb_sort_attempted')}>
+                          {t('pd_lb_attempted')} {lbSort==='attempted' && <i className="fa-solid fa-sort-down"></i>}
+                        </button>
+                      </th>
+                      <th>
+                        <button className="pd-lb-sort-btn" onClick={()=>{setLbSort('accuracy');setLbPage(0);}} aria-label={t('pd_lb_sort_accuracy')}>
+                          {t('pd_lb_accuracy')} {lbSort==='accuracy' && <i className="fa-solid fa-sort-down"></i>}
+                        </button>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lbPageRows.map(row => (
+                      <tr key={row.studentId || row.rank}>
+                        <td><span className={`pd-lb-rank${row.rank<=3?` top${row.rank}`:''}`}>{row.rank}</span></td>
+                        <td className="pd-lb-name">{row.studentName}</td>
+                        <td>{row.attempted.toLocaleString(lang==='da'?'da-DK':'en-IN')}</td>
+                        <td><span className="pd-lb-acc-pill">{row.accuracy}%</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                {/* Mobile card fallback — same data, touch-friendly layout */}
+                <div className="pd-lb-cards">
+                  {lbPageRows.map(row => (
+                    <div key={row.studentId || row.rank} className="pd-lb-card">
+                      <span className={`pd-lb-rank${row.rank<=3?` top${row.rank}`:''}`}>{row.rank}</span>
+                      <div className="pd-lb-card-body">
+                        <div className="pd-lb-name">{row.studentName}</div>
+                        <div className="pd-lb-card-meta">{row.attempted.toLocaleString(lang==='da'?'da-DK':'en-IN')} {t('pd_lb_attempted').toLowerCase()} · {row.accuracy}% {t('pd_lb_accuracy').toLowerCase()}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {lbPageCount > 1 && (
+                <div className="pd-lb-pagination">
+                  <button className="btn btn-ghost pd-lb-page-btn" disabled={lbPageClamped===0} onClick={()=>setLbPage(p=>Math.max(0,p-1))}>
+                    <i className="fa-solid fa-chevron-left"></i> {t('pd_lb_prev')}
+                  </button>
+                  <span className="pd-lb-page-lbl">{t('pd_lb_page_of', { n: lbPageClamped+1, total: lbPageCount })}</span>
+                  <button className="btn btn-ghost pd-lb-page-btn" disabled={lbPageClamped>=lbPageCount-1} onClick={()=>setLbPage(p=>Math.min(lbPageCount-1,p+1))}>
+                    {t('pd_lb_next')} <i className="fa-solid fa-chevron-right"></i>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="pd-cta">
-            <p>Already enrolled? Pick up right where you left off.</p>
-            <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-right-to-bracket"></i> Continue Learning in the Student Portal</a>
+            <p>{t('pd_cta_text')}</p>
+            <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-right-to-bracket"></i> {t('pd_cta_btn')}</a>
           </div>
         </div>
       </section>
 
+
       {/* ── ABOUT ── */}
       <section id="about" className="sec sec-alt">
         <div className="sec-in">
-          <p className="sec-lbl">About the Academy</p>
-          <h2 className="sec-h">A different kind of<br/>learning experience</h2>
-          <p className="sec-sub">We combine rigorous CBSE standards with a child-centric, mentorship-first approach — making learning effective, personalised, and genuinely enjoyable.</p>
+          <p className="sec-lbl">{t('about_lbl')}</p>
+          <h2 className="sec-h">{t('about_h_1')}<br/>{t('about_h_2')}</h2>
+          <p className="sec-sub">{t('about_sub')}</p>
           <div className="why-g">
             {cms.about.map((item, i) => (
               <div key={i} className="why-c">
@@ -654,15 +823,15 @@ export default function Home() {
       {/* ── CLASSES ── */}
       <section id="classes" className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Academic Programs</p>
-          <h2 className="sec-h">Classes Offered</h2>
-          <p className="sec-sub">Six class levels, each with a tailored curriculum, learning objectives, and teaching approach designed for that specific age group.</p>
+          <p className="sec-lbl">{t('classes_lbl')}</p>
+          <h2 className="sec-h">{t('classes_h')}</h2>
+          <p className="sec-sub">{t('classes_sub')}</p>
           <div className="cls-g">
             {cms.classes.map(cls => (
               <div key={cls.Id} className="cls-c">
                 <div className="cls-chip" style={{background:`${cls.Color}22`, color: cls.Color, border:`1px solid ${cls.Color}44`}}>{cls.Id}</div>
                 <div className="cls-label">{cls.Label}</div>
-                <div className="cls-age">Age {cls.Age}</div>
+                <div className="cls-age">{t('classes_age')} {cls.Age}</div>
                 <div className="cls-desc">{cls.Description}</div>
               </div>
             ))}
@@ -673,9 +842,9 @@ export default function Home() {
       {/* ── SUBJECTS ── */}
       <section id="subjects" className="sec sec-alt">
         <div className="sec-in">
-          <p className="sec-lbl">What We Teach</p>
-          <h2 className="sec-h">Five core subjects,<br/>taught exceptionally well</h2>
-          <p className="sec-sub">Each subject has a dedicated structure — clear topics, defined learning goals, and proven teaching methods used by our expert mentors.</p>
+          <p className="sec-lbl">{t('subjects_lbl')}</p>
+          <h2 className="sec-h">{t('subjects_h_1')}<br/>{t('subjects_h_2')}</h2>
+          <p className="sec-sub">{t('subjects_sub')}</p>
           <div className="subj-g">
             {cms.subjects.map(s => (
               <div key={s.Name} className="subj-c">
@@ -684,9 +853,9 @@ export default function Home() {
                   <span className="subj-nm">{s.Name}</span>
                 </div>
                 <div className="subj-row">
-                  <div className="subj-item"><label>Topics Covered</label><p>{s.Topics}</p></div>
-                  <div className="subj-item"><label>Learning Goal</label><p>{s.Goal}</p></div>
-                  <div className="subj-item"><label>Teaching Method</label><p>{s.Method}</p></div>
+                  <div className="subj-item"><label>{t('subjects_topics_covered')}</label><p>{s.Topics}</p></div>
+                  <div className="subj-item"><label>{t('subjects_learning_goal')}</label><p>{s.Goal}</p></div>
+                  <div className="subj-item"><label>{t('subjects_teaching_method')}</label><p>{s.Method}</p></div>
                 </div>
               </div>
             ))}
@@ -697,9 +866,9 @@ export default function Home() {
       {/* ── SCHEDULE ── */}
       <section id="schedule" className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Tuition Timings</p>
-          <h2 className="sec-h">Available Batches</h2>
-          <p className="sec-sub">Choose the schedule that fits your routine. Seat availability updates in real time — reserve yours during enrollment.</p>
+          <p className="sec-lbl">{t('sched_lbl')}</p>
+          <h2 className="sec-h">{t('sched_h')}</h2>
+          <p className="sec-sub">{t('sched_sub')}</p>
           <div className="sched-g">
             {cms.schedules.map((s, i) => {
               const seats = Number(s.Seats);
@@ -710,14 +879,14 @@ export default function Home() {
                 <div key={i} className="sched-c">
                   <div className="sched-top">
                     <span className="sched-batch">{s.Batch}</span>
-                    <span className="mode-tag" style={{background:modeColor, color:modeText}}>{s.Mode}</span>
+                    <span className="mode-tag" style={{background:modeColor, color:modeText}}>{t(`sched_mode_${s.Mode.toLowerCase()}`)}</span>
                   </div>
                   <div className="sched-rows">
                     <div className="sched-row"><i className="fa-solid fa-calendar"></i>{s.Days}</div>
                     <div className="sched-row"><i className="fa-solid fa-clock"></i>{s.Time}</div>
                   </div>
                   <div className="seats" style={{color: seats>=4?'#4ade80':seats>=2?'#f97316':'#ef4444'}}>
-                    <span className={dotCls}></span>{seats} seat{seats!==1?'s':''} available
+                    <span className={dotCls}></span>{seats} {seats===1?t('sched_seats_available_one'):t('sched_seats_available_many')}
                   </div>
                 </div>
               );
@@ -729,23 +898,23 @@ export default function Home() {
       {/* ── FEES ── */}
       <section id="fees" className="sec sec-alt">
         <div className="sec-in">
-          <p className="sec-lbl">Fee Structure</p>
-          <h2 className="sec-h">Simple, transparent pricing</h2>
-          <p className="sec-sub">No hidden charges. Pay monthly. Cancel anytime. All plans include access to the student portal and progress dashboard.</p>
+          <p className="sec-lbl">{t('fees_lbl')}</p>
+          <h2 className="sec-h">{t('fees_h')}</h2>
+          <p className="sec-sub">{t('fees_sub')}</p>
           <div className="fees-g">
             {cms.fees.map((f, i) => {
               const isHighlight = String(f.Highlight).toUpperCase() === 'TRUE';
               const perks = typeof f.Perks === 'string' ? f.Perks.split('|') : (f.Perks || []);
               return (
                 <div key={i} className={`fee-c${isHighlight ? ' hi' : ''}`}>
-                  {isHighlight && <span className="fee-badge">Most Popular</span>}
+                  {isHighlight && <span className="fee-badge">{t('fees_most_popular')}</span>}
                   <div className="fee-tier">{f.Tier}</div>
                   <div className="fee-price">{f.Price}</div>
-                  <div className="fee-period">{f.Period} · per student</div>
+                  <div className="fee-period">{f.Period} · {t('fees_per_student')}</div>
                   <div className="fee-perks">
                     {perks.map((p, j) => <div key={j} className="fee-perk"><i className="fa-solid fa-check-circle"></i>{p.trim()}</div>)}
                   </div>
-                  <a href="#enroll" className="btn btn-accent" style={{width:'100%',justifyContent:'center'}}><i className="fa-solid fa-user-plus"></i> Enroll Now</a>
+                  <a href="#enroll" className="btn btn-accent" style={{width:'100%',justifyContent:'center'}}><i className="fa-solid fa-user-plus"></i> {t('fees_enroll_now')}</a>
                 </div>
               );
             })}
@@ -756,17 +925,17 @@ export default function Home() {
       {/* ── TESTIMONIALS ── */}
       <section className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Parent Stories</p>
-          <h2 className="sec-h">What families say</h2>
-          <p className="sec-sub">Real words from the parents and students who are part of the ApexCBSE community.</p>
+          <p className="sec-lbl">{t('test_lbl')}</p>
+          <h2 className="sec-h">{t('test_h')}</h2>
+          <p className="sec-sub">{t('test_sub')}</p>
           <div className="test-g">
-            {cms.testimonials.map((t, i) => (
+            {cms.testimonials.map((item, i) => (
               <div key={i} className="test-c">
                 <div className="test-q">"</div>
-                <p className="test-txt">{t.Text}</p>
+                <p className="test-txt">{item.Text}</p>
                 <div className="test-auth">
                   <div className="test-av"><i className="fa-solid fa-user"></i></div>
-                  <div><div className="test-name">{t.Name}</div><div className="test-role">{t.Role}</div></div>
+                  <div><div className="test-name">{item.Name}</div><div className="test-role">{item.Role}</div></div>
                 </div>
               </div>
             ))}
@@ -777,22 +946,22 @@ export default function Home() {
       {/* ── TEACHERS ── */}
       <section id="teachers" className="sec sec-alt">
         <div className="sec-in">
-          <p className="sec-lbl">Expert Mentors</p>
-          <h2 className="sec-h">Meet your child's teachers</h2>
-          <p className="sec-sub">Background-verified specialists dedicated to child-centred primary education and measurable academic outcomes.</p>
+          <p className="sec-lbl">{t('teach_lbl')}</p>
+          <h2 className="sec-h">{t('teach_h')}</h2>
+          <p className="sec-sub">{t('teach_sub')}</p>
           <div className="teach-g">
-            {cms.teachers.map(t => (
-              <div key={t.Id} className="teach-c">
-                {t.ImageUrl
-                  ? <img src={t.ImageUrl} alt={t.Name} style={{width:'64px',height:'64px',borderRadius:'16px',objectFit:'cover',flexShrink:0}} />
+            {cms.teachers.map(teacher => (
+              <div key={teacher.Id} className="teach-c">
+                {teacher.ImageUrl
+                  ? <img src={teacher.ImageUrl} alt={teacher.Name} style={{width:'64px',height:'64px',borderRadius:'16px',objectFit:'cover',flexShrink:0}} />
                   : <div className="teach-av"><i className="fa-solid fa-user-tie"></i></div>
                 }
                 <div>
-                  <div className="teach-id">{t.Id}</div>
-                  <div className="teach-name">{t.Name}</div>
-                  <div className="teach-qual">{t.Qualification} · {t.Experience} Experience</div>
-                  <div className="teach-tag"><i className="fa-solid fa-chalkboard-user" style={{fontSize:'11px'}}></i>{t.Subjects}</div>
-                  <div className="teach-bio">{t.Bio}</div>
+                  <div className="teach-id">{teacher.Id}</div>
+                  <div className="teach-name">{teacher.Name}</div>
+                  <div className="teach-qual">{teacher.Qualification} · {teacher.Experience} {t('teach_experience')}</div>
+                  <div className="teach-tag"><i className="fa-solid fa-chalkboard-user" style={{fontSize:'11px'}}></i>{teacher.Subjects}</div>
+                  <div className="teach-bio">{teacher.Bio}</div>
                 </div>
               </div>
             ))}
@@ -803,9 +972,9 @@ export default function Home() {
       {/* ── FAQ ── */}
       <section className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Got Questions?</p>
-          <h2 className="sec-h">Frequently Asked Questions</h2>
-          <p className="sec-sub">Everything parents ask before enrolling — answered clearly and honestly.</p>
+          <p className="sec-lbl">{t('faq_lbl')}</p>
+          <h2 className="sec-h">{t('faq_h')}</h2>
+          <p className="sec-sub">{t('faq_sub')}</p>
           <div className="faq-list">
             {cms.faqs.map((f, i) => (
               <div key={i} className="faq-item">
@@ -823,43 +992,43 @@ export default function Home() {
       <div className="pb">
         <div className="pb-in">
           <div>
-            <h2>Already enrolled? Your dashboard is waiting.</h2>
-            <p>View assignments, track progress, check schedules — all in one place.</p>
+            <h2>{t('pb_h')}</h2>
+            <p>{t('pb_p')}</p>
           </div>
-          <a href="/portal" className="btn-white"><i className="fa-solid fa-arrow-right-to-bracket"></i> Open Student Portal</a>
+          <a href="/portal" className="btn-white"><i className="fa-solid fa-arrow-right-to-bracket"></i> {t('pb_btn')}</a>
         </div>
       </div>
 
       {/* ── ENROLL FORM ── */}
       <section id="enroll" className="sec sec-dark">
         <div className="sec-in">
-          <p className="sec-lbl">Get Started</p>
-          <h2 className="sec-h">Enrollment Registration</h2>
-          <p className="sec-sub">Complete the form below. Your Student ID and login credentials are generated instantly on submission.</p>
+          <p className="sec-lbl">{t('enroll_lbl')}</p>
+          <h2 className="sec-h">{t('enroll_h')}</h2>
+          <p className="sec-sub">{t('enroll_sub')}</p>
 
           {formStatus.state === 'success' ? (
             <div className="success-card">
               <div style={{display:'flex',alignItems:'center',gap:'12px',marginBottom:'20px'}}>
                 <div style={{width:'44px',height:'44px',borderRadius:'12px',background:'var(--teal)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',color:'#fff',flexShrink:0}}><i className="fa-solid fa-circle-check"></i></div>
                 <div>
-                  <div style={{fontWeight:800,fontSize:'17px',color:'#fff'}}>Enrollment Successful! 🎉</div>
-                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>Your login credentials are ready — save them now</div>
+                  <div style={{fontWeight:800,fontSize:'17px',color:'#fff'}}>{t('f_success_title')}</div>
+                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>{t('f_success_sub')}</div>
                 </div>
               </div>
               <div className="cred-g">
-                <div className="cred-box"><div className="cred-lbl">Student ID</div><div className="cred-val" style={{color:'var(--teal)'}}>{formStatus.studentId}</div></div>
-                <div className="cred-box"><div className="cred-lbl">Username</div><div className="cred-val" style={{color:'#fff'}}>{formStatus.username}</div></div>
-                <div className="cred-box"><div className="cred-lbl">Temp Password</div><div className="cred-val" style={{color:'var(--accent)'}}>{formStatus.tempPassword}</div></div>
+                <div className="cred-box"><div className="cred-lbl">{t('f_cred_student_id')}</div><div className="cred-val" style={{color:'var(--teal)'}}>{formStatus.studentId}</div></div>
+                <div className="cred-box"><div className="cred-lbl">{t('f_cred_username')}</div><div className="cred-val" style={{color:'#fff'}}>{formStatus.username}</div></div>
+                <div className="cred-box"><div className="cred-lbl">{t('f_cred_temp_password')}</div><div className="cred-val" style={{color:'var(--accent)'}}>{formStatus.tempPassword}</div></div>
               </div>
-              <p style={{fontSize:'12px',color:'rgba(255,255,255,.45)',marginBottom:'20px',lineHeight:1.7}}>⚠ Screenshot or write down these credentials. You will be prompted to set a new password on first login.</p>
-              <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-arrow-right-to-bracket"></i> Go to Student Portal</a>
+              <p style={{fontSize:'12px',color:'rgba(255,255,255,.45)',marginBottom:'20px',lineHeight:1.7}}>{t('f_cred_warning')}</p>
+              <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-arrow-right-to-bracket"></i> {t('f_go_to_portal')}</a>
             </div>
           ) : (
             <form onSubmit={handleEnroll}>
               <div className="form-wrap">
                 {/* STEP INDICATOR */}
                 <div className="steps">
-                  {['Student','Parent','Course','Confirm'].map((s,i)=>(
+                  {[t('enroll_step_student'),t('enroll_step_parent'),t('enroll_step_course'),t('enroll_step_confirm')].map((s,i)=>(
                     <div key={i} className={`step-item${step>i+1?' done':step===i+1?' active':''}`}>
                       <div className="step-circle">{step>i+1?<i className="fa-solid fa-check"></i>:i+1}</div>
                       <span className="step-lbl">{s}</span>
@@ -870,39 +1039,39 @@ export default function Home() {
                 {step===1 && (
                   <div>
                     <div className="fg-2">
-                      <div className="fg"><label className="fl">Student Full Name *</label><input name="studentName" required className="fi" placeholder="e.g. Rohan Sharma" defaultValue={formData.studentName} /></div>
-                      <div className="fg"><label className="fl">Date of Birth *</label><input name="dob" type="date" required className="fi" defaultValue={formData.dob} /></div>
+                      <div className="fg"><label className="fl">{t('f_student_name')}</label><input name="studentName" required className="fi" placeholder={t('f_student_name_ph')} defaultValue={formData.studentName} /></div>
+                      <div className="fg"><label className="fl">{t('f_dob')}</label><input name="dob" type="date" required className="fi" defaultValue={formData.dob} /></div>
                     </div>
                     <div className="fg-2">
-                      <div className="fg"><label className="fl">Gender</label>
-                        <select name="gender" className="fi" defaultValue={formData.gender}><option value="">Select…</option><option>Male</option><option>Female</option><option>Prefer not to say</option></select>
+                      <div className="fg"><label className="fl">{t('f_gender')}</label>
+                        <select name="gender" className="fi" defaultValue={formData.gender}><option value="">{t('f_gender_select')}</option><option>{t('f_gender_male')}</option><option>{t('f_gender_female')}</option><option>{t('f_gender_na')}</option></select>
                       </div>
-                      <div className="fg"><label className="fl">School Name</label><input name="schoolName" className="fi" placeholder="e.g. Delhi Public School" defaultValue={formData.schoolName} /></div>
+                      <div className="fg"><label className="fl">{t('f_school_name')}</label><input name="schoolName" className="fi" placeholder={t('f_school_name_ph')} defaultValue={formData.schoolName} /></div>
                     </div>
-                    <div className="fg"><label className="fl">Current Grade / Class *</label>
+                    <div className="fg"><label className="fl">{t('f_class_level')}</label>
                       <select name="classLevel" required className="fi" defaultValue={formData.classLevel}>
-                        <option value="">Select class…</option>
+                        <option value="">{t('f_class_select')}</option>
                         {cms.classes.map(cls => <option key={cls.Id} value={cls.Id}>{cls.Label}</option>)}
                       </select>
                     </div>
-                    <div className="step-nav"><span></span><button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,2)}>Next: Parent Info <i className="fa-solid fa-arrow-right"></i></button></div>
+                    <div className="step-nav"><span></span><button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,2)}>{t('f_next_parent')} <i className="fa-solid fa-arrow-right"></i></button></div>
                   </div>
                 )}
 
                 {step===2 && (
                   <div>
                     <div className="fg-2">
-                      <div className="fg"><label className="fl">Parent / Guardian Name *</label><input name="parentName" required className="fi" placeholder="e.g. Mr. Vijay Sharma" defaultValue={formData.parentName} /></div>
-                      <div className="fg"><label className="fl">Email Address *</label><input name="email" type="email" required className="fi" placeholder="parent@email.com" defaultValue={formData.email} /></div>
+                      <div className="fg"><label className="fl">{t('f_parent_name')}</label><input name="parentName" required className="fi" placeholder={t('f_parent_name_ph')} defaultValue={formData.parentName} /></div>
+                      <div className="fg"><label className="fl">{t('f_email')}</label><input name="email" type="email" required className="fi" placeholder="parent@email.com" defaultValue={formData.email} /></div>
                     </div>
                     <div className="fg-2">
-                      <div className="fg"><label className="fl">Primary Phone *</label><input name="phone" type="tel" required className="fi" placeholder="+91 98765 43210" defaultValue={formData.phone} /></div>
-                      <div className="fg"><label className="fl">Emergency Contact</label><input name="emergencyContact" type="tel" className="fi" placeholder="+91 00000 00000" defaultValue={formData.emergencyContact} /></div>
+                      <div className="fg"><label className="fl">{t('f_phone')}</label><input name="phone" type="tel" required className="fi" placeholder={t('f_phone_ph')} defaultValue={formData.phone} /></div>
+                      <div className="fg"><label className="fl">{t('f_emergency')}</label><input name="emergencyContact" type="tel" className="fi" placeholder={t('f_emergency_ph')} defaultValue={formData.emergencyContact} /></div>
                     </div>
-                    <div className="fg"><label className="fl">Home Address</label><input name="address" className="fi" placeholder="Flat/House No., Street, City" defaultValue={formData.address} /></div>
+                    <div className="fg"><label className="fl">{t('f_address')}</label><input name="address" className="fi" placeholder={t('f_address_ph')} defaultValue={formData.address} /></div>
                     <div className="step-nav">
-                      <button type="button" className="btn-back" onClick={()=>setStep(1)}><i className="fa-solid fa-arrow-left"></i> Back</button>
-                      <button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,3)}>Next: Course Selection <i className="fa-solid fa-arrow-right"></i></button>
+                      <button type="button" className="btn-back" onClick={()=>setStep(1)}><i className="fa-solid fa-arrow-left"></i> {t('f_back')}</button>
+                      <button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,3)}>{t('f_next_course')} <i className="fa-solid fa-arrow-right"></i></button>
                     </div>
                   </div>
                 )}
@@ -910,28 +1079,28 @@ export default function Home() {
                 {step===3 && (
                   <div>
                     <div className="fg-2">
-                      <div className="fg"><label className="fl">Preferred Teacher</label>
+                      <div className="fg"><label className="fl">{t('f_preferred_teacher')}</label>
                         <select name="teacherId" className="fi" defaultValue={formData.teacherId}>
-                          <option value="">No preference</option>
-                          {cms.teachers.map(t => <option key={t.Id} value={t.Id}>{t.Name} ({t.Id})</option>)}
+                          <option value="">{t('f_no_preference')}</option>
+                          {cms.teachers.map(teacher => <option key={teacher.Id} value={teacher.Id}>{teacher.Name} ({teacher.Id})</option>)}
                         </select>
                       </div>
-                      <div className="fg"><label className="fl">Preferred Batch</label>
+                      <div className="fg"><label className="fl">{t('f_preferred_batch')}</label>
                         <select name="timeSlot" className="fi" defaultValue={formData.timeSlot}>
-                          <option value="">Select batch…</option>
+                          <option value="">{t('f_select_batch')}</option>
                           {cms.schedules.map((s, i) => <option key={i} value={s.Batch}>{s.Batch} — {s.Time}</option>)}
                         </select>
                       </div>
                     </div>
-                    <div className="fg"><label className="fl">Learning Mode</label>
+                    <div className="fg"><label className="fl">{t('f_learning_mode')}</label>
                       <select name="learningMode" className="fi" defaultValue={formData.learningMode}>
-                        <option value="">Select mode…</option>
-                        <option value="Physical">Physical (In-person)</option>
-                        <option value="Online">Online (Google Meet / Zoom)</option>
-                        <option value="Hybrid">Hybrid (Mix of both)</option>
+                        <option value="">{t('f_select_mode')}</option>
+                        <option value="Physical">{t('f_mode_physical')}</option>
+                        <option value="Online">{t('f_mode_online')}</option>
+                        <option value="Hybrid">{t('f_mode_hybrid')}</option>
                       </select>
                     </div>
-                    <div className="fg"><label className="fl">Subjects Required</label>
+                    <div className="fg"><label className="fl">{t('f_subjects_required')}</label>
                       <div className="cb-g">
                         {cms.subjects.map(s => (
                           <label key={s.Name} className="cb-l">
@@ -942,8 +1111,8 @@ export default function Home() {
                       </div>
                     </div>
                     <div className="step-nav">
-                      <button type="button" className="btn-back" onClick={()=>setStep(2)}><i className="fa-solid fa-arrow-left"></i> Back</button>
-                      <button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,4)}>Review & Confirm <i className="fa-solid fa-arrow-right"></i></button>
+                      <button type="button" className="btn-back" onClick={()=>setStep(2)}><i className="fa-solid fa-arrow-left"></i> {t('f_back')}</button>
+                      <button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvance(e,4)}>{t('f_review_confirm')} <i className="fa-solid fa-arrow-right"></i></button>
                     </div>
                   </div>
                 )}
@@ -951,30 +1120,30 @@ export default function Home() {
                 {step===4 && (
                   <div>
                     <div style={{background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.09)',borderRadius:'12px',padding:'20px',marginBottom:'20px'}}>
-                      <p style={{fontSize:'12px',fontWeight:700,color:'var(--teal)',marginBottom:'14px',letterSpacing:'0.5px',textTransform:'uppercase'}}>Review Your Details</p>
+                      <p style={{fontSize:'12px',fontWeight:700,color:'var(--teal)',marginBottom:'14px',letterSpacing:'0.5px',textTransform:'uppercase'}}>{t('f_review_title')}</p>
                       <div className="review-g">
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Student: </span>{formData.studentName || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>DOB: </span>{formData.dob || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Class: </span>{formData.classLevel || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>School: </span>{formData.schoolName || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Parent: </span>{formData.parentName || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Email: </span>{formData.email || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Phone: </span>{formData.phone || '—'}</div>
-                        <div><span style={{color:'rgba(255,255,255,.4)'}}>Mode: </span>{formData.learningMode || '—'}</div>
-                        <div style={{gridColumn:'1/-1'}}><span style={{color:'rgba(255,255,255,.4)'}}>Subjects: </span>{formData.subjects.length > 0 ? formData.subjects.join(', ') : '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_student')} </span>{formData.studentName || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_dob')} </span>{formData.dob || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_class')} </span>{formData.classLevel || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_school')} </span>{formData.schoolName || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_parent')} </span>{formData.parentName || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_email')} </span>{formData.email || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_phone')} </span>{formData.phone || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_mode')} </span>{formData.learningMode ? t(`f_review_mode_${formData.learningMode.toLowerCase()}`) : '—'}</div>
+                        <div style={{gridColumn:'1/-1'}}><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_review_subjects')} </span>{formData.subjects.length > 0 ? formData.subjects.join(', ') : '—'}</div>
                       </div>
                     </div>
                     <div style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:'10px',padding:'14px 18px',marginBottom:'16px'}}>
                       <p style={{fontSize:'12px',color:'rgba(255,255,255,.4)',lineHeight:1.8}}>
-                        By submitting you confirm all details are accurate. A student account will be created instantly and your login credentials will be displayed on screen. The registrar will contact you within 24 hours to confirm batch placement.
+                        {t('f_review_disclaimer')}
                       </p>
                     </div>
                     {formStatus.state==='error' && <div className="status-err">⚠ {formStatus.message}</div>}
                     <button type="submit" className="btn-submit" disabled={formStatus.state==='loading'}>
-                      {formStatus.state==='loading' ? <><i className="fa-solid fa-circle-notch fa-spin"></i> Creating your account…</> : <><i className="fa-solid fa-paper-plane"></i> Submit Enrollment & Create Account</>}
+                      {formStatus.state==='loading' ? <><i className="fa-solid fa-circle-notch fa-spin"></i> {t('f_creating_account')}</> : <><i className="fa-solid fa-paper-plane"></i> {t('f_submit')}</>}
                     </button>
                     <div className="step-nav" style={{marginTop:'12px'}}>
-                      <button type="button" className="btn-back" onClick={()=>setStep(3)}><i className="fa-solid fa-arrow-left"></i> Back</button>
+                      <button type="button" className="btn-back" onClick={()=>setStep(3)}><i className="fa-solid fa-arrow-left"></i> {t('f_back')}</button>
                       <span></span>
                     </div>
                   </div>
@@ -988,15 +1157,15 @@ export default function Home() {
       {/* ── CONTACT ── */}
       <section id="contact" className="sec sec-alt">
         <div className="sec-in">
-          <p className="sec-lbl">Get In Touch</p>
-          <h2 className="sec-h">Contact Us</h2>
-          <p className="sec-sub">Have a question before enrolling? Reach out — we respond within a few hours.</p>
+          <p className="sec-lbl">{t('contact_lbl')}</p>
+          <h2 className="sec-h">{t('contact_h')}</h2>
+          <p className="sec-sub">{t('contact_sub')}</p>
           <div className="contact-g">
             {[
-              { ic:'fa-brands fa-whatsapp', cl:'#4ade80',      label:'WhatsApp', val:'Chat Now',          href:`https://wa.me/${c.whatsappNumber}` },
-              { ic:'fa-solid fa-phone',     cl:'#60a5fa',      label:'Phone',    val: c.phone,            href:`tel:${c.phone}` },
-              { ic:'fa-solid fa-envelope',  cl:'var(--accent)', label:'Email',   val: c.email,            href:`mailto:${c.email}` },
-              { ic:'fa-solid fa-location-dot', cl:'#f87171',   label:'Location', val: c.address,         href:'#' },
+              { ic:'fa-brands fa-whatsapp', cl:'#4ade80',      label:t('contact_whatsapp'), val:t('contact_chat_now'),          href:`https://wa.me/${c.whatsappNumber}` },
+              { ic:'fa-solid fa-phone',     cl:'#60a5fa',      label:t('contact_phone'),    val: c.phone,            href:`tel:${c.phone}` },
+              { ic:'fa-solid fa-envelope',  cl:'var(--accent)', label:t('contact_email'),   val: c.email,            href:`mailto:${c.email}` },
+              { ic:'fa-solid fa-location-dot', cl:'#f87171',   label:t('contact_location'), val: c.address,         href:'#' },
             ].map((item, i) => (
               <a key={i} href={item.href} target={item.href.startsWith('http')?'_blank':'_self'} rel="noopener noreferrer"
                 style={{display:'flex',alignItems:'center',gap:'16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'14px',padding:'22px',textDecoration:'none',transition:'all .2s'}}
@@ -1015,32 +1184,41 @@ export default function Home() {
         <div className="footer-in">
           <div>
             <div className="f-brand">ApexCBSE Academy</div>
-            <p className="f-p">Dedicated foundational coaching built to scale child proficiency while keeping primary learning fun, engaging, and outcome-focused. CBSE aligned, KG to Class 5.</p>
+            <p className="f-p">{t('footer_brand_desc')}</p>
           </div>
           <div>
-            <p className="f-h">Academy</p>
-            <a href="#about"    className="f-lnk">About Us</a>
-            <a href="#classes"  className="f-lnk">Classes</a>
-            <a href="#subjects" className="f-lnk">Subjects</a>
-            <a href="#teachers" className="f-lnk">Teachers</a>
+            <p className="f-h">{t('footer_academy')}</p>
+            <a href="#about"    className="f-lnk">{t('footer_about_us')}</a>
+            <a href="#classes"  className="f-lnk">{t('footer_classes')}</a>
+            <a href="#subjects" className="f-lnk">{t('footer_subjects')}</a>
+            <a href="#teachers" className="f-lnk">{t('footer_teachers')}</a>
           </div>
           <div>
-            <p className="f-h">Admission</p>
-            <a href="#schedule" className="f-lnk">Schedules</a>
-            <a href="#fees"     className="f-lnk">Fee Structure</a>
-            <a href="#enroll"   className="f-lnk">Enroll Now</a>
-            <a href="/portal"   className="f-lnk">Student Portal</a>
+            <p className="f-h">{t('footer_admission')}</p>
+            <a href="#schedule" className="f-lnk">{t('footer_schedules')}</a>
+            <a href="#fees"     className="f-lnk">{t('footer_fee_structure')}</a>
+            <a href="#enroll"   className="f-lnk">{t('footer_enroll_now')}</a>
+            <a href="/portal"   className="f-lnk">{t('footer_student_portal')}</a>
           </div>
           <div>
-            <p className="f-h">Contact</p>
-            <a href={`https://wa.me/${c.whatsappNumber}`} target="_blank" rel="noopener noreferrer" className="f-lnk" style={{color:'#4ade80'}}><i className="fa-brands fa-whatsapp"></i> WhatsApp</a>
+            <p className="f-h">{t('footer_contact')}</p>
+            <a href={`https://wa.me/${c.whatsappNumber}`} target="_blank" rel="noopener noreferrer" className="f-lnk" style={{color:'#4ade80'}}><i className="fa-brands fa-whatsapp"></i> {t('contact_whatsapp')}</a>
             <a href={`tel:${c.phone}`} className="f-lnk"><i className="fa-solid fa-phone"></i> {c.phone}</a>
             <span className="f-lnk"><i className="fa-solid fa-envelope"></i> {c.email}</span>
             <span className="f-lnk"><i className="fa-solid fa-location-dot"></i> {c.address}</span>
           </div>
         </div>
-        <div className="footer-bot">© 2026 ApexCBSE Academy. All Rights Reserved. CBSE Aligned · KG to Class 5.</div>
+        <div className="footer-bot">{t('footer_rights')}</div>
       </footer>
     </>
   );
 }
+
+export default function Home() {
+  return (
+    <LanguageProvider>
+      <HomeInner />
+    </LanguageProvider>
+  );
+}
+
