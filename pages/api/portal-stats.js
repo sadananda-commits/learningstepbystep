@@ -89,10 +89,14 @@ export default async function handler(req, res) {
   }
 
   try {
-    const [statsRes, leaderboardRes, questionCounts] = await Promise.all([
+    const [statsRes, leaderboardRes, questionCounts, topicCounts] = await Promise.all([
       fetch(`${SCRIPT_URL}?action=portalStats`, { signal: AbortSignal.timeout(12000) }),
       fetch(`${SCRIPT_URL}?action=leaderboard`, { signal: AbortSignal.timeout(12000) }),
       Promise.all(Object.keys(SHEETS.subjects).map(name => countQuestionsInTab(SHEETS.subjects[name], 'Learning Steps'))),
+      // Total Topics Available (Req #6) — same per-subject sheets, just the
+      // Learning Modules tab (one row per topic) instead of Learning Steps
+      // (one row per question).
+      Promise.all(Object.keys(SHEETS.subjects).map(name => countQuestionsInTab(SHEETS.subjects[name], 'Learning Modules'))),
     ]);
 
     const stats       = statsRes.ok ? await statsRes.json() : {};
@@ -100,6 +104,8 @@ export default async function handler(req, res) {
     if (stats.error) throw new Error(stats.error);
 
     const totalQuestionsAvailable = questionCounts.reduce((sum, n) => sum + n, 0);
+    const totalTopicsAvailable    = topicCounts.reduce((sum, n) => sum + n, 0);
+    const totalSubjectsAvailable  = Object.keys(SHEETS.subjects).length;
 
     const overall = leaderboard.overall || [];
     const bySubject = leaderboard.bySubject || {};
@@ -115,7 +121,15 @@ export default async function handler(req, res) {
       totalQuestionsAvailable: totalQuestionsAvailable,
       totalQuestionsAttempted: stats.totalQuestionsAttempted || 0,
       totalCorrectAnswers:     stats.totalCorrectAnswers || 0,
+      totalSubjectsAvailable:  totalSubjectsAvailable,
+      totalTopicsAvailable:    totalTopicsAvailable,
       topPerformers,
+      // Full ranked list (not just the top performer) — backs the home
+      // page's "Top Students" leaderboard table (Req #7): rank, student,
+      // questions attempted, accuracy. Capped at 50 here; the table itself
+      // paginates client-side from this array so there's no need for the
+      // client to request more than one page of raw data.
+      leaderboardOverall: overall.slice(0, 50),
       recentActivity: stats.recentActivity || [],
     };
     cacheAt = Date.now();
@@ -127,7 +141,8 @@ export default async function handler(req, res) {
     if (cache) { res.setHeader('X-Cache', 'STALE'); return res.status(200).json(cache); }
     return res.status(200).json({
       totalStudents: 0, totalQuestionsAvailable: 0, totalQuestionsAttempted: 0,
-      totalCorrectAnswers: 0, topPerformers: { overall: null, bySubject: {} }, recentActivity: [],
+      totalCorrectAnswers: 0, totalSubjectsAvailable: 0, totalTopicsAvailable: 0,
+      topPerformers: { overall: null, bySubject: {} }, leaderboardOverall: [], recentActivity: [],
       _error: err.message,
     });
   }
