@@ -26,7 +26,7 @@ async function fetchAllSheetData() {
 // ─────────────────────────────────────────────────────────────────────────────
 const FALLBACK = {
   settings: {
-    SiteName:'Student Portal', AcademyName:'ApexCBSE Academy',
+    SiteName:'Student Portal', AcademyName:'Vedanta Academy',
     BackLinkLabel:'Back to Academy', BackLinkURL:'/',
     LoginHeading:'Student Portal', LoginSubheading:'Sign in to access your personal dashboard',
     LoginButtonLabel:'Access My Dashboard', LoadingButtonText:'Verifying…',
@@ -860,6 +860,11 @@ function PortalInner() {
   const [learnProgress,  setLearnProgress]  = useState({});
   const [leaderboard,    setLeaderboard]    = useState({ overall:[], bySubject:{} });
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  // Real per-student data fetched post-login. null = loading/not-yet-fetched.
+  // Falls back to cfg FALLBACK gracefully if the API is unreachable.
+  const [realSubjects,    setRealSubjects]    = useState(null);
+  const [realAssignments, setRealAssignments] = useState(null);
+  const [realAttendance,  setRealAttendance]  = useState(null);
 
   const subjectRef = useRef(null);
   const attendRef  = useRef(null);
@@ -941,9 +946,36 @@ function PortalInner() {
   // ── Helpers ───────────────────────────────────────────────────────────────────
   const S          = cfg.settings;
   const NAV        = cfg.navigation.filter(t => isRowActive(t.Active));
-  const AMON       = cfg.attMonthly;
-  const ASTAT      = cfg.attStats;
-  const ASGN       = cfg.assignments.filter(a => isRowActive(a.Active));
+  // AMON / ASTAT: prefer real attendance API data when available, fall back to demo config.
+  const realAtt   = realAttendance;
+  const AMON       = realAtt
+    ? (realAtt.records || []).reduce((acc, rec) => {
+        const monthKey = (rec.Date || '').slice(0, 7); // YYYY-MM
+        if (!monthKey) return acc;
+        if (!acc.find(m => m._key === monthKey)) {
+          const d = new Date(monthKey + '-01');
+          acc.push({ _key: monthKey,
+            Month: d.toLocaleString('en-IN', {month:'long'}),
+            'Month Short': d.toLocaleString('en-IN', {month:'short'}),
+            'Attendance %': 0, _total: 0, _present: 0, 'Display Order': acc.length + 1 });
+        }
+        const entry = acc.find(m => m._key === monthKey);
+        entry._total++;
+        const v = String(rec.Present || '').trim().toUpperCase();
+        if (v === 'TRUE' || v === 'YES' || v === '1') entry._present++;
+        entry['Attendance %'] = Math.round((entry._present / entry._total) * 100);
+        return acc;
+      }, []).slice(-6) // last 6 months
+    : cfg.attMonthly;
+
+  const ASTAT      = realAtt?.summary
+    ? [
+        { Metric:'classes_conducted', Value: String(realAtt.summary.total   || 0), Label:'Classes Conducted', 'Display Order':1 },
+        { Metric:'classes_attended',  Value: String(realAtt.summary.attended || 0), Label:'Classes Attended',  'Display Order':2 },
+        { Metric:'attendance_rate',   Value: `${realAtt.summary.rate || 0}%`,        Label:'Attendance Rate',  'Display Order':3 },
+      ]
+    : cfg.attStats;
+
   const SCHED      = cfg.schedule.filter(s => isRowActive(s.Active));
   const PFIELDS    = cfg.profileFields;
   const LMOD    = (cfg.learningModules||[]).filter(m=>isRowActive(m.Active)).sort((a,b)=>(Number(a['Display Order'])||0)-(Number(b['Display Order'])||0));
@@ -954,6 +986,28 @@ function PortalInner() {
   // from LMOD — so a brand-new subject just needs a row here + topic rows above,
   // no app code changes.
   const ASGN_SUBJ = (cfg.assignmentSubjects||[]).filter(s=>isRowActive(s.Active)).sort((a,b)=>(Number(a['Display Order'])||0)-(Number(b['Display Order'])||0));
+
+  // ASGN: prefer real API assignments. Compute 'Overdue' status automatically
+  // (teacher sets Not Started/In Progress; client marks Overdue if past due date).
+  // Must be declared AFTER ASGN_SUBJ (used for subject colour lookup).
+  const today = new Date().toISOString().slice(0, 10);
+  const ASGN_RAW = realAssignments || cfg.assignments;
+  const ASGN = ASGN_RAW.filter(a => isRowActive(a.Active !== undefined ? a.Active : true)).map(a => {
+    const subjectColor = (ASGN_SUBJ.find(s=>s.Subject===a.Subject)||{})['Color (Hex)'] || a['Color (Hex)'] || '#00c6a7';
+    let status = a.Status || 'Not Started';
+    if (!['Completed','Graded','graded','submitted'].includes(status)) {
+      const dueIso = a.DueDate ? new Date(a.DueDate).toISOString().slice(0,10) : null;
+      if (dueIso && dueIso < today) status = 'Overdue';
+    }
+    return { ...a, Status: status, 'Color (Hex)': subjectColor };
+  }).sort((a, b) => {
+    const priority = { Overdue: 0, 'Not Started': 1, 'In Progress': 2, Completed: 3, Graded: 4, graded: 4, submitted: 3 };
+    const pa = priority[a.Status] ?? 1, pb = priority[b.Status] ?? 1;
+    if (pa !== pb) return pa - pb;
+    const da = a.DueDate ? new Date(a.DueDate) : new Date(9999,0);
+    const db = b.DueDate ? new Date(b.DueDate) : new Date(9999,0);
+    return da - db;
+  });
   const topicsForSubject = subjectName => LMOD.filter(m=>m.Subject===subjectName);
   const subjectStats = subjectName => {
     const topics = topicsForSubject(subjectName);
@@ -961,32 +1015,41 @@ function PortalInner() {
     return { total: topics.length, completed };
   };
 
-  // ── Real Student Progress Dashboard (Req #5): every number below is derived
+  // ── Real Student Progress Dashboard: every number below is derived
   // live from learnProgress (per-module attempt/correct/completedAt state,
-  // synced to the StudentProgress sheet via recordAnswer) — nothing here is
-  // hardcoded sample data. A subject with no topics configured yet, or one the
-  // student hasn't touched, still renders correctly at 0/0.
+  // synced to the StudentProgress sheet via recordAnswer). When the real
+  // Subjects API also returns data, we merge both sources — sheet data
+  // is authoritative for TopicsDone/TotalTopics when set (teacher-managed);
+  // quiz-level analytics always come from learnProgress (more granular).
   const SUBJ = ASGN_SUBJ.map(subj => {
-    const topics = topicsForSubject(subj.Subject);
+    const topics        = topicsForSubject(subj.Subject);
     const topicProgress = topics.map(m => learnProgress[m['Module ID']]);
-    const topicsDone   = topicProgress.filter(p => p?.completedAt).length;
-    const attempted    = topicProgress.reduce((sum,p) => sum + (p?.attempted || 0), 0);
-    const correct      = topicProgress.reduce((sum,p) => sum + (p?.correct   || 0), 0);
-    const incorrect    = topicProgress.reduce((sum,p) => sum + (p?.incorrect || 0), 0);
-    const lastAttempt  = topicProgress.reduce((latest,p) => {
+    const topicsDone    = topicProgress.filter(p => p?.completedAt).length;
+    const attempted     = topicProgress.reduce((sum,p) => sum + (p?.attempted || 0), 0);
+    const correct       = topicProgress.reduce((sum,p) => sum + (p?.correct   || 0), 0);
+    const incorrect     = topicProgress.reduce((sum,p) => sum + (p?.incorrect || 0), 0);
+    const lastAttempt   = topicProgress.reduce((latest,p) => {
       const ts = p?.completedAt || p?.startedAt;
       return ts && (!latest || ts > latest) ? ts : latest;
     }, null);
+
+    // Merge with real subject data from the Subjects API when available
+    const realSubj = realSubjects?.find(s => s.Subject === subj.Subject);
+    const totalTopics  = realSubj?.['Total Topics'] ?? topics.length;
+    const doneTopics   = realSubj?.['Topics Done']  ?? topicsDone;
+    const pct          = totalTopics ? Math.round((doneTopics / totalTopics) * 100) : 0;
+
     return {
-      Subject: subj.Subject,
-      'Color (Hex)': subj['Color (Hex)'] || '#00c6a7',
-      'Total Topics': topics.length,
-      'Topics Done': topicsDone,
-      'Progress %': topics.length ? Math.round((topicsDone/topics.length)*100) : 0,
-      QuestionsAttempted: attempted,
-      QuestionsCorrect: correct,
-      QuestionsIncorrect: incorrect,
-      LastAttemptDate: lastAttempt ? new Date(lastAttempt).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}) : '—',
+      Subject:            subj.Subject,
+      'Color (Hex)':      subj['Color (Hex)'] || '#00c6a7',
+      'Total Topics':     totalTopics,
+      'Topics Done':      doneTopics,
+      'Progress %':       realSubj?.['Progress %'] ?? pct,
+      QuestionsAttempted: realSubj?.QuestionsAttempted  ?? attempted,
+      QuestionsCorrect:   realSubj?.QuestionsCorrect    ?? correct,
+      QuestionsIncorrect: realSubj?.QuestionsIncorrect  ?? incorrect,
+      LastAttemptDate:    realSubj?.LastAttemptDate
+        || (lastAttempt ? new Date(lastAttempt).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}) : '—'),
     };
   });
 
@@ -1031,8 +1094,18 @@ function PortalInner() {
     setTab('assignments');
   };
 
+  // Compute live stat card values from real data where available, overriding
+  // the hardcoded demo values in cfg.dashStats for those specific metrics.
+  const liveStatOverrides = {
+    attendance_pct:   realAtt?.summary ? `${realAtt.summary.rate}%` : null,
+    pending_tasks:    realAssignments  ? String(ASGN.filter(a=>['Not Started','In Progress','Overdue'].includes(a.Status)).length) : null,
+  };
   const statCards  = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && ['attendance_pct','submissions_pct','avg_score','pending_tasks'].includes(s['Metric Key']))
-    .map(s => s['Metric Key']==='avg_score' && liveQuizAvg!==null ? { ...s, Value:String(liveQuizAvg) } : s);
+    .map(s => {
+      if (s['Metric Key']==='avg_score' && liveQuizAvg!==null) return { ...s, Value:String(liveQuizAvg) };
+      if (liveStatOverrides[s['Metric Key']]) return { ...s, Value: liveStatOverrides[s['Metric Key']] };
+      return s;
+    });
   const ratioStats = cfg.dashStats.filter(s => isRowActive(s.Active) && s['Metric Key'] && s['Metric Key'].startsWith('ratio_'))
     .map(s => s['Metric Key']==='ratio_quiz_avg' && liveQuizAvg!==null ? { ...s, Value:String(liveQuizAvg) } : s);
   const nextN      = parseInt(S.DashboardNextClasses, 10) || 3;
@@ -1131,10 +1204,6 @@ function PortalInner() {
         const rebuilt = rebuildLearnProgressFromRows(progress, moduleId => stepsFor(moduleId).length);
         setLearnProgress(prev => {
           const merged = { ...rebuilt };
-          // Local always wins per-module if it has at least as many attempts
-          // as the sheet rebuild — covers the case where the student just
-          // answered something on this device and the sheet write hasn't
-          // round-tripped back through the cache yet.
           Object.keys(prev).forEach(moduleId => {
             const localAttempted = prev[moduleId]?.attempted || 0;
             const rebuiltAttempted = merged[moduleId]?.attempted || 0;
@@ -1145,6 +1214,22 @@ function PortalInner() {
         });
       })
       .catch(() => {}); // offline or sheet unreachable — localStorage already rendered above
+
+    // ── Fetch real per-student data (subjects progress, assignments, attendance)
+    // in parallel. Each is independent — if one fails the others still render.
+    const sid = encodeURIComponent(profile.id);
+    Promise.allSettled([
+      fetch(`/api/student/subjects?studentId=${sid}`).then(r=>r.json()),
+      fetch(`/api/student/assignments?studentId=${sid}`).then(r=>r.json()),
+      fetch(`/api/student/attendance?studentId=${sid}`).then(r=>r.json()),
+    ]).then(([subjRes, asgnRes, attRes]) => {
+      if (subjRes.status === 'fulfilled' && subjRes.value.subjects?.length)
+        setRealSubjects(subjRes.value.subjects);
+      if (asgnRes.status === 'fulfilled' && asgnRes.value.assignments?.length)
+        setRealAssignments(asgnRes.value.assignments);
+      if (attRes.status === 'fulfilled' && attRes.value.records !== undefined)
+        setRealAttendance(attRes.value);
+    });
   }, [profile.id, cfgReady]);
 
   const saveLearnProgress = useCallback((moduleId, patch) => {
@@ -1323,6 +1408,17 @@ function PortalInner() {
     .asgn-badge.pending{background:rgba(245,166,35,.12);color:var(--accent);border:1px solid rgba(245,166,35,.25);}
     .asgn-badge.submitted{background:rgba(0,198,167,.1);color:var(--teal);border:1px solid rgba(0,198,167,.2);}
     .asgn-badge.graded{background:rgba(34,197,94,.1);color:#4ade80;border:1px solid rgba(34,197,94,.2);}
+    .asgn-badge.overdue{background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.25);}
+    .asgn-badge.inprogress{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25);}
+    /* Assignment summary strip */
+    .asgn-summary-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+    .asgn-summary-cell{background:var(--surf2);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:center;}
+    .asgn-summary-val{font-family:var(--fd);font-size:24px;font-weight:900;margin-bottom:3px;}
+    .asgn-summary-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);}
+    /* Enhanced assignment item */
+    .asgn-item-v2{align-items:flex-start;flex-direction:column;gap:0;}
+    .asgn-item-v2 .asgn-dot{flex-shrink:0;margin-top:4px;align-self:flex-start;}
+    @media(max-width:640px){.asgn-summary-strip{grid-template-columns:repeat(2,1fr);}}
     .upload-zone{border:2px dashed rgba(255,255,255,.12);border-radius:var(--r);padding:36px;text-align:center;transition:all .2s;cursor:pointer;display:block;}
     .upload-zone:hover{border-color:var(--teal);background:rgba(0,198,167,.04);}
     .sch-item{background:var(--surf2);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:12px;display:flex;align-items:center;gap:16px;}
@@ -1810,20 +1906,140 @@ function PortalInner() {
                   <div className="sec-divider" style={{marginTop:0}}>{t('p_choose_subject')}</div>
                   <AssignmentSubjectsGrid subjects={ASGN_SUBJ} statsFor={subjectStats} onOpen={setActiveAssignmentSubject} t={t} />
 
+                  {/* ── PERSONALIZED ASSIGNMENT DASHBOARD ──────────────────────────
+                      Shows real assignments from the Assignments Sheet tab when
+                      available, falling back to the demo FALLBACK assignments.
+                      Features: status tracking with auto-Overdue detection,
+                      difficulty badges, due-date urgency colouring, progress
+                      summary strip, recommendations from weak quiz subjects,
+                      and inline homework submission. ── */}
                   <div className="sec-divider">{t('p_homework_submissions')}</div>
-                  <div className="card" style={{marginBottom:'22px'}}>
-                    <div className="card-t"><i className="fa-solid fa-list" /> {t('p_all_assignments')}</div>
-                    {ASGN.map(a=>(
-                      <div key={a['Assignment ID']} className="asgn-item">
-                        <div className="asgn-dot" style={{background:a['Color (Hex)']}} />
-                        <div className="asgn-body">
-                          <div className="asgn-title">{a.Title}</div>
-                          <div className="asgn-meta">{a.Subject} · {t('p_due')} {a['Due Date']}{a.Grade?` · ${t('p_grade')} ${a.Grade}`:''}</div>
+
+                  {/* Assignment summary strip */}
+                  {ASGN.length > 0 && (
+                    <div className="asgn-summary-strip">
+                      {[
+                        { label: 'Total',       val: ASGN.length,                                             color: 'var(--teal)'  },
+                        { label: 'Overdue',     val: ASGN.filter(a=>a.Status==='Overdue').length,             color: '#ef4444'       },
+                        { label: 'In Progress', val: ASGN.filter(a=>a.Status==='In Progress').length,         color: 'var(--accent)' },
+                        { label: 'Completed',   val: ASGN.filter(a=>['Completed','graded','submitted'].includes(a.Status)).length, color: '#22c55e' },
+                      ].map((s,i) => (
+                        <div key={i} className="asgn-summary-cell">
+                          <div className="asgn-summary-val" style={{color:s.color}}>{s.val}</div>
+                          <div className="asgn-summary-lbl">{s.label}</div>
                         </div>
-                        <span className={`asgn-badge ${a.Status}`}>{a.Status==='graded'?`✓ ${a.Grade||t('p_status_graded')}`:t(`p_status_${a.Status}`)}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Personalized Recommendations — from weak quiz subjects */}
+                  {(() => {
+                    const weakSubjects = SUBJ.filter(s =>
+                      s.QuestionsAttempted >= 5 &&
+                      s.QuestionsAttempted > 0 &&
+                      (s.QuestionsCorrect / s.QuestionsAttempted) < 0.65
+                    );
+                    if (!weakSubjects.length) return null;
+                    return (
+                      <div className="card" style={{borderColor:'rgba(245,166,35,.3)',marginBottom:'20px'}}>
+                        <div className="card-t" style={{color:'var(--accent)'}}>
+                          <i className="fa-solid fa-lightbulb" /> Recommended Focus Areas
+                        </div>
+                        <p style={{fontSize:'13px',color:'rgba(255,255,255,.6)',marginBottom:'14px',lineHeight:1.7}}>
+                          Based on your quiz performance, extra practice is recommended in:
+                        </p>
+                        {weakSubjects.map(s => {
+                          const acc = s.QuestionsAttempted ? Math.round((s.QuestionsCorrect/s.QuestionsAttempted)*100) : 0;
+                          return (
+                            <div key={s.Subject} style={{display:'flex',alignItems:'center',gap:'12px',padding:'11px 0',borderBottom:'1px solid rgba(255,255,255,.06)'}}>
+                              <div style={{width:'34px',height:'34px',borderRadius:'9px',background:`${s['Color (Hex)']}22`,color:s['Color (Hex)'],display:'flex',alignItems:'center',justifyContent:'center',fontSize:'14px',flexShrink:0}}>
+                                <i className="fa-solid fa-book" />
+                              </div>
+                              <div style={{flex:1}}>
+                                <div style={{fontWeight:700,color:'#fff',fontSize:'14px'}}>{s.Subject}</div>
+                                <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>
+                                  {s.QuestionsAttempted} questions attempted · {acc}% accuracy
+                                </div>
+                              </div>
+                              <span style={{fontSize:'11px',fontWeight:700,padding:'3px 9px',borderRadius:'100px',background:'rgba(239,68,68,.14)',color:'#f87171'}}>
+                                Needs Practice
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
-                    ))}
+                    );
+                  })()}
+
+                  {/* All Assignments — sorted: Overdue → In Progress → Not Started → Completed */}
+                  <div className="card" style={{marginBottom:'22px'}}>
+                    <div className="card-t"><i className="fa-solid fa-list-check" /> {t('p_all_assignments')}</div>
+                    {ASGN.length === 0 ? (
+                      <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>
+                        No assignments yet — check back once your teacher posts one.
+                      </div>
+                    ) : ASGN.map(a => {
+                      const statusMeta = {
+                        'Overdue':     { cls:'overdue',   label:'⚠ Overdue',      dot:'#ef4444' },
+                        'Not Started': { cls:'pending',   label:'Not Started',    dot:'rgba(255,255,255,.3)' },
+                        'In Progress': { cls:'inprogress',label:'In Progress',    dot:'var(--accent)' },
+                        'Completed':   { cls:'submitted', label:'✓ Completed',    dot:'#22c55e' },
+                        'graded':      { cls:'graded',    label:`✓ ${a.Grade||'Graded'}`, dot:'#22c55e' },
+                        'submitted':   { cls:'submitted', label:'Submitted',      dot:'var(--teal)' },
+                        'pending':     { cls:'pending',   label:'Not Started',    dot:'rgba(255,255,255,.3)' },
+                      };
+                      const sm = statusMeta[a.Status] || statusMeta['Not Started'];
+
+                      // Due date urgency
+                      const dueStr = a.DueDate || a['Due Date'] || '';
+                      let dueColor = 'var(--muted)';
+                      if (a.Status === 'Overdue') dueColor = '#ef4444';
+                      else if (dueStr) {
+                        const daysAway = Math.ceil((new Date(dueStr) - new Date()) / 86400000);
+                        if (daysAway <= 1) dueColor = '#f97316';
+                        else if (daysAway <= 3) dueColor = 'var(--accent)';
+                      }
+
+                      // Progress bar for In Progress assignments
+                      const progressPct = a.ProgressPct ? Number(a.ProgressPct) : null;
+
+                      return (
+                        <div key={a['Assignment ID'] || a.AssignmentID || Math.random()} className="asgn-item asgn-item-v2">
+                          <div className="asgn-dot" style={{background:sm.dot}} />
+                          <div className="asgn-body" style={{flex:1}}>
+                            <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px',flexWrap:'wrap'}}>
+                              <div>
+                                <div className="asgn-title">{a.Title}</div>
+                                <div className="asgn-meta">
+                                  {a.Subject}
+                                  {(a.DueDate||a['Due Date']) && <> · <span style={{color:dueColor,fontWeight:600}}>Due {a.DueDate||a['Due Date']}</span></>}
+                                  {a.Difficulty && <> · <span style={{color:'rgba(255,255,255,.4)'}}>{a.Difficulty}</span></>}
+                                  {a.Grade && <> · <span style={{color:'#4ade80',fontWeight:700}}>Grade: {a.Grade}</span></>}
+                                </div>
+                                {a.Description && (
+                                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.45)',marginTop:'4px',lineHeight:1.6}}>{a.Description}</div>
+                                )}
+                                {a.TeacherNotes && (
+                                  <div style={{fontSize:'12px',color:'rgba(0,198,167,.7)',marginTop:'4px',fontStyle:'italic'}}>📝 {a.TeacherNotes}</div>
+                                )}
+                              </div>
+                              <span className={`asgn-badge ${sm.cls}`}>{sm.label}</span>
+                            </div>
+                            {progressPct !== null && (
+                              <div style={{marginTop:'8px'}}>
+                                <div style={{height:'5px',background:'rgba(255,255,255,.07)',borderRadius:'100px',overflow:'hidden'}}>
+                                  <div style={{height:'100%',width:`${progressPct}%`,background:'var(--teal)',borderRadius:'100px',transition:'width .4s'}} />
+                                </div>
+                                <div style={{fontSize:'11px',color:'var(--muted)',marginTop:'3px'}}>{progressPct}% complete</div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
+
+                  {/* Homework submission card */}
                   <div className="card">
                     <div className="card-t"><i className="fa-solid fa-cloud-arrow-up" /> {t('p_submit_homework')}</div>
                     <label className="upload-zone" htmlFor="hwFile">

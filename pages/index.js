@@ -65,7 +65,7 @@ const FALLBACK = {
   contact: {
     whatsappNumber: '919999999999',
     phone:          '+91 99999 99999',
-    email:          'support@apexcbse.com',
+    email:          'support@vedantaacademy.com',
     address:        'Sector 15, Block C, New Delhi',
   },
   hero: {
@@ -570,7 +570,7 @@ function HomeInner() {
         <div className="nav-i">
           <a href="#home" className="logo">
             <div className="logo-box"><i className="fa-solid fa-graduation-cap"></i></div>
-            <span className="logo-txt">ApexCBSE</span>
+            <span className="logo-txt">Vedanta Academy</span>
           </a>
           <div className="nav-links">
             <a href="#dashboard" className="nl">{t('nav_dashboard')}</a>
@@ -580,7 +580,8 @@ function HomeInner() {
             <a href="#schedule" className="nl">{t('nav_schedule')}</a>
             <a href="#fees"     className="nl">{t('nav_fees')}</a>
             <a href="#contact"  className="nl">{t('nav_contact')}</a>
-            <a href="/portal"   className="n-portal"><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+            <a href="/portal"        className="n-portal"><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+            <a href="/parent-portal" className="n-portal" style={{background:'rgba(168,85,247,.15)',borderColor:'rgba(168,85,247,.3)',color:'#c084fc'}}><i className="fa-solid fa-users-between-lines" style={{fontSize:'11px'}}></i> {t('nav_parent_login')}</a>
             <a href="#enroll"   className="n-cta">{t('nav_enroll_now')}</a>
             <LanguageToggle style={{marginLeft:'4px'}} />
           </div>
@@ -604,7 +605,8 @@ function HomeInner() {
           <a href="#schedule" className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_schedule')}</a>
           <a href="#fees"     className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_fees')}</a>
           <a href="#contact"  className="nl" onClick={()=>setMobileNavOpen(false)}>{t('nav_contact')}</a>
-          <a href="/portal"   className="n-portal" style={{marginTop:'10px',textAlign:'center'}}><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+          <a href="/portal"        className="n-portal" style={{marginTop:'10px',textAlign:'center'}}><i className="fa-solid fa-lock-open" style={{fontSize:'11px'}}></i> {t('nav_student_login')}</a>
+          <a href="/parent-portal" className="n-portal" style={{textAlign:'center',marginTop:'8px',background:'rgba(168,85,247,.15)',borderColor:'rgba(168,85,247,.3)',color:'#c084fc'}}><i className="fa-solid fa-users-between-lines" style={{fontSize:'11px'}}></i> {t('nav_parent_login')}</a>
           <a href="#enroll"   className="n-cta" style={{textAlign:'center',marginTop:'8px'}} onClick={()=>setMobileNavOpen(false)}>{t('nav_enroll_now')}</a>
         </div>
       </div>
@@ -1183,7 +1185,7 @@ function HomeInner() {
       <footer className="footer">
         <div className="footer-in">
           <div>
-            <div className="f-brand">ApexCBSE Academy</div>
+            <div className="f-brand">Vedanta Academy</div>
             <p className="f-p">{t('footer_brand_desc')}</p>
           </div>
           <div>
@@ -1198,7 +1200,8 @@ function HomeInner() {
             <a href="#schedule" className="f-lnk">{t('footer_schedules')}</a>
             <a href="#fees"     className="f-lnk">{t('footer_fee_structure')}</a>
             <a href="#enroll"   className="f-lnk">{t('footer_enroll_now')}</a>
-            <a href="/portal"   className="f-lnk">{t('footer_student_portal')}</a>
+            <a href="/portal"        className="f-lnk">{t('footer_student_portal')}</a>
+            <a href="/parent-portal" className="f-lnk">{t('footer_parent_portal')}</a>
           </div>
           <div>
             <p className="f-h">{t('footer_contact')}</p>
