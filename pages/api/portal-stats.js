@@ -1,7 +1,7 @@
 // pages/api/portal-stats.js
 // Aggregates everything index.js's "Home Page Dashboard" section (Req #8)
 // needs, from two sources:
-//   1. Script 1 (ApexCBSE Students sheet) via ?action=portalStats — total
+//   1. Script 1 (Vedanta Academy Students sheet) via ?action=portalStats — total
 //      students, total questions attempted/correct, recent activity feed.
 //   2. The same public question-bank CSV sheets portal-config.js already
 //      reads — just to count total questions available across all subjects.
