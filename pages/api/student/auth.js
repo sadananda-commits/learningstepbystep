@@ -1,5 +1,5 @@
 // pages/api/student/auth.js
-// Authenticates via Script 1 (ApexCBSE Students sheet)
+// Authenticates via Script 1 (Vedanta Academy Students sheet)
 
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzPphEigUXVQnH2QUvpmTt-R1tDf3D_I9UnTqBs-D5axUp31zcy6i0ptYiL6rol5hCU/exec';
 

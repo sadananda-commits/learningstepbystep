@@ -1,6 +1,6 @@
 // pages/api/student/progress.js
 // Writes one progress event (a single answered question) to Script 1
-// (ApexCBSE Students sheet → StudentProgress tab). Mirrors enroll.js's
+// (Vedanta Academy Students sheet → StudentProgress tab). Mirrors enroll.js's
 // pattern: same Apps Script web app, just a different payload key.
 //
 // portal.js calls this once per answered question via saveLearnProgress(),
