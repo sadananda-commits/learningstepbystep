@@ -1,12 +1,11 @@
 // pages/api/enroll.js
-// Writes new enrolment to Script 1 (Vedanta Academy Students sheet)
-// No SheetDB — uses Google Apps Script doPost endpoint.
+// Writes new enrolment to Vedanta Academy Students sheet via Apps Script.
 
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzPphEigUXVQnH2QUvpmTt-R1tDf3D_I9UnTqBs-D5axUp31zcy6i0ptYiL6rol5hCU/exec';
+const SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
+  'https://script.google.com/macros/s/AKfycbzPphEigUXVQnH2QUvpmTt-R1tDf3D_I9UnTqBs-D5axUp31zcy6i0ptYiL6rol5hCU/exec';
 
 function generateStudentId() {
-  const rand = Math.floor(100000 + Math.random() * 900000);
-  return `APX${rand}`;
+  return `APX${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 function generateUsername(name) {
@@ -14,7 +13,7 @@ function generateUsername(name) {
 }
 
 function generateTempPassword() {
-  return `Apex@${new Date().getFullYear()}`;
+  return `Vedanta@${new Date().getFullYear()}`;
 }
 
 export default async function handler(req, res) {
@@ -24,7 +23,7 @@ export default async function handler(req, res) {
   const {
     studentName, dob, parentName, email, phone,
     emergencyContact, address, classLevel, teacherId,
-    timeSlot, subjects,
+    timeSlot, subjects, gender, schoolName, learningMode,
   } = req.body;
 
   if (!studentName || !parentName || !email || !phone || !classLevel)
@@ -36,35 +35,39 @@ export default async function handler(req, res) {
   const enrolledAt   = new Date().toISOString();
 
   const payload = {
-    action: 'enroll',
     enrollment: {
       StudentID:        studentId,
       StudentName:      studentName,
-      DOB:              dob || '',
+      DOB:              dob          || '',
+      Gender:           gender       || '',
+      SchoolName:       schoolName   || '',
       ParentName:       parentName,
       Email:            email,
       Phone:            String(phone),
       EmergencyContact: emergencyContact || '',
-      Address:          address || '',
+      Address:          address      || '',
       ClassLevel:       classLevel,
-      TeacherID:        teacherId || '',
-      TimeSlot:         timeSlot || '',
-      Subjects:         Array.isArray(subjects) ? subjects.join(', ') : subjects || '',
+      TeacherID:        teacherId    || '',
+      TimeSlot:         timeSlot     || '',
+      LearningMode:     learningMode || '',
+      Subjects:         Array.isArray(subjects) ? subjects.join(', ') : (subjects || ''),
       EnrolledAt:       enrolledAt,
       Status:           'Pending',
     },
     account: {
-      StudentID:         studentId,
-      Username:          username,
-      Password:          tempPassword,
-      DisplayName:       studentName,
-      Active:            'TRUE',
-      MustResetPassword: 'TRUE',
+      // These column names must EXACTLY match the Accounts sheet headers.
+      StudentID:  studentId,
+      Username:   username,
+      Password:   tempPassword,
+      // FullName — the column the auth API reads for the student's display name
+      FullName:   studentName,
+      // ClassLevel — the column the auth API reads to set the age group
+      ClassLevel: classLevel,
+      Active:     'TRUE',
     },
   };
 
   try {
-    console.log('[enroll] Posting to Apps Script, studentId:', studentId);
     const r = await fetch(SCRIPT_URL, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -73,8 +76,6 @@ export default async function handler(req, res) {
     });
 
     const raw = await r.text();
-    console.log('[enroll] Response:', r.status, raw.slice(0, 300));
-
     let data;
     try { data = JSON.parse(raw); } catch { data = { raw }; }
 
