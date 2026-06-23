@@ -847,7 +847,10 @@ function PortalInner() {
   const [cfgReady,    setCfgReady]    = useState(false);
   const [authed,      setAuthed]      = useState(false);
   const [tab,         setTab]         = useState('dashboard');
-  const [profile,     setProfile]     = useState({ name:'', id:'', classLevel:'Class 3' });
+  // Profile starts empty — filled from localStorage in the useEffect below
+  // (can't read localStorage in useState initialiser because Next.js runs it
+  // server-side where window doesn't exist, so the read is always skipped).
+  const [profile, setProfile] = useState({ name: '', id: '', classLevel: 'Class 3' });
   const [loginErr,    setLoginErr]    = useState('');
   const [loading,     setLoading]     = useState(false);
   const [uploadName,  setUploadName]  = useState('');
@@ -933,15 +936,17 @@ function PortalInner() {
         };
         setCfg(merged);
         setNotifs(merged.notifications.filter(n=>isRowActive(n.Active)));
-        // classLevel comes from the student's Accounts row (set in the auth
-        // response handler above). The profileFields config only has a generic
-        // placeholder so we only use it as a last resort when auth hasn't run
-        // yet (i.e. profile.id is still empty — not logged in yet, just
-        // preloading the config for the login screen).
+        // IMPORTANT: never overwrite classLevel here. It comes from two
+        // authoritative sources: (1) the auth API response (login), and
+        // (2) localStorage (restored on mount). The profileFields config
+        // only has a generic 'Class 3' placeholder. The only time we
+        // should touch classLevel from config is if neither source has
+        // ever provided a real value — i.e. a completely fresh first visit
+        // where localStorage is empty AND the student hasn't logged in yet.
         setProfile(p => {
-          if (p.id) return p; // already authenticated — keep auth-provided values
-          const cl = merged.profileFields.find(f=>f['Field Key']==='class_level');
-          return { ...p, classLevel: cl?.Value || merged.settings.DefaultClassLevel || 'Class 3' };
+          if (p.id) return p; // logged in — classLevel came from auth, never overwrite
+          const cl = merged.profileFields.find(f => f['Field Key'] === 'class_level');
+          return { ...p, classLevel: cl?.Value || '' };
         });
         setCfgReady(true);
       })
@@ -1009,7 +1014,8 @@ function PortalInner() {
     'Class 4': 'Age 8–9', 'class4': 'Age 8–9',
     'Class 5': 'Age 9–10','class5': 'Age 9–10',
   };
-  const studentAgeGroup = CLASS_TO_AGE[profile.classLevel] || CLASS_TO_AGE['Class 3'];
+  const studentAgeGroup   = CLASS_TO_AGE[profile.classLevel] || null;
+  const classLevelIsSet   = !!studentAgeGroup; // false when sheet value is blank
 
   // Backward-compatible subject name mapping.
   // Old module Subject values → canonical display subject names.
@@ -1274,7 +1280,7 @@ function PortalInner() {
   // ── Derive the current student's subject list from their age group ───────────
   // This replaces ASGN_SUBJ (the old flat subject list from cfg.assignmentSubjects).
   // AGE_SUBJECTS is the canonical list of subjects for THIS student's age group.
-  const currentCurriculum = AGE_CURRICULUM[studentAgeGroup] || AGE_CURRICULUM['Age 7–8'];
+  const currentCurriculum = AGE_CURRICULUM[studentAgeGroup || 'Age 7–8'] || AGE_CURRICULUM['Age 7–8'];
   const AGE_SUBJECTS = currentCurriculum.subjects;
 
   // ── topicsForSubject: match modules by key + all aliases ────────────────────
@@ -1486,12 +1492,16 @@ function PortalInner() {
     try {
       const res  = await fetch(S.AuthAPIEndpoint||'/api/student/auth', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p}) });
       const data = await res.json();
+      console.log('[portal] Auth response:', JSON.stringify(data));
       if (res.ok && data.authenticated) {
         setProfile(prev => ({
           ...prev,
           name:       data.fullName || data.username,
           id:         data.studentId,
-          classLevel: data.classLevel || prev.classLevel || 'Class 3',
+          // Use exactly what the sheet returned. If blank, store '' so the
+          // Assignments tab shows a "set your class" prompt instead of
+          // silently showing Class 3 content that may be wrong.
+          classLevel: data.classLevel || '',
         }));
         setAuthed(true);
       }
@@ -1502,9 +1512,37 @@ function PortalInner() {
 
   const handleLogout = () => {
     destroyCharts(); setAuthed(false); setTab('dashboard'); setMobileNavOpen(false);
-    setProfile({ name:'', id:'', classLevel: S.DefaultClassLevel||'Class 3' });
+    // Clear localStorage FIRST so the persistence effect below doesn't
+    // immediately re-save the reset state with classLevel: 'Class 3'.
+    try { localStorage.removeItem('vedanta_profile'); } catch {}
+    setProfile({ name: '', id: '', classLevel: 'Class 3' });
     setLoginErr('');
   };
+
+  // ── Restore profile from localStorage on client mount ────────────────────────
+  // This runs only in the browser (not during SSR) so localStorage is always
+  // available. It restores name, id, and classLevel from the previous session
+  // so the correct age group / class shows immediately — even before the auth
+  // API responds. The auth re-validates credentials, but the UI doesn't have
+  // to wait for that before showing the right content.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('vedanta_profile');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Only restore if there's a real studentId — don't restore a half-empty state
+        if (parsed?.id) {
+          setProfile(parsed);
+        }
+      }
+    } catch {}
+  }, []); // empty deps — runs once after first client render, never again
+
+  // ── Persist profile to localStorage whenever it changes ──────────────────────
+  useEffect(() => {
+    if (!profile.id) return; // don't save the empty pre-login state
+    try { localStorage.setItem('vedanta_profile', JSON.stringify(profile)); } catch {}
+  }, [profile.id, profile.name, profile.classLevel]);
 
   // ── Interactive Learning: per-student progress ───────────────────────────────
   // Persisted to localStorage (so it survives a refresh, and renders instantly
@@ -2241,7 +2279,75 @@ function PortalInner() {
                   topics, progress, and quiz modules. Hindi/Computer show a
                   "Coming Soon" state until sheet content is added. ── */}
 
-              {!activeAssignmentSubject ? (
+              {/* ── CLASS NOT SET PROMPT ── */}
+              {!classLevelIsSet && !activeAssignmentSubject && (
+                <div className="content" style={{paddingTop:'32px'}}>
+                  <div className="main-top">
+                    <div><div className="pg-h">{t('p_assignments_title')}</div></div>
+                  </div>
+                  <div className="card" style={{borderColor:'rgba(245,166,35,.4)',textAlign:'center',padding:'40px 30px'}}>
+                    <div style={{fontSize:'48px',marginBottom:'16px'}}>🎓</div>
+                    <div style={{fontFamily:'var(--fd)',fontSize:'22px',fontWeight:900,color:'#fff',marginBottom:'10px'}}>
+                      Your Class Level is Not Set
+                    </div>
+                    <div style={{fontSize:'14px',color:'var(--muted)',marginBottom:'28px',lineHeight:1.8,maxWidth:'420px',margin:'0 auto 28px'}}>
+                      To see your age-appropriate subjects and topics, please set your class level.
+                      You can do this in your <strong style={{color:'var(--teal)'}}>Profile</strong> tab.
+                    </div>
+                    <div style={{display:'flex',gap:'12px',justifyContent:'center',flexWrap:'wrap'}}>
+                      <button className="btn-t" onClick={()=>setTab('profile')}>
+                        <i className="fa-solid fa-user-pen" /> Go to Profile →  Set Class Level
+                      </button>
+                    </div>
+                    <div style={{marginTop:'28px',padding:'16px',background:'rgba(255,255,255,.04)',borderRadius:'12px',textAlign:'left'}}>
+                      <div style={{fontSize:'12px',fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:'10px'}}>Quick Set</div>
+                      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'8px'}}>
+                        {[
+                          ['Class 1','Age 5–6'],['Class 2','Age 6–7'],['Class 3','Age 7–8'],
+                          ['Class 4','Age 8–9'],['Class 5','Age 9–10'],
+                        ].map(([cls, age]) => (
+                          <button
+                            key={cls}
+                            onClick={async () => {
+                              // Save immediately to the sheet AND update local state
+                              const r = await fetch('/api/student/profile', {
+                                method: 'POST',
+                                headers: {'Content-Type':'application/json'},
+                                body: JSON.stringify({ studentId: profile.id, classLevel: cls }),
+                              });
+                              const data = await r.json();
+                              if (data.success) {
+                                setProfile(p => {
+                                  const updated = { ...p, classLevel: cls };
+                                  try { localStorage.setItem('vedanta_profile', JSON.stringify(updated)); } catch {}
+                                  return updated;
+                                });
+                              } else {
+                                // Even if the API fails, update local state so the UI works
+                                setProfile(p => {
+                                  const updated = { ...p, classLevel: cls };
+                                  try { localStorage.setItem('vedanta_profile', JSON.stringify(updated)); } catch {}
+                                  return updated;
+                                });
+                              }
+                            }}
+                            style={{padding:'10px 14px',borderRadius:'10px',border:'1px solid rgba(255,255,255,.12)',
+                              background:'rgba(255,255,255,.04)',color:'rgba(255,255,255,.8)',cursor:'pointer',
+                              fontFamily:'var(--fb)',fontWeight:700,fontSize:'13px',textAlign:'center',transition:'all .15s'}}
+                            onMouseOver={e=>e.currentTarget.style.background='rgba(0,198,167,.12)'}
+                            onMouseOut={e=>e.currentTarget.style.background='rgba(255,255,255,.04)'}
+                          >
+                            <div>{cls}</div>
+                            <div style={{fontSize:'11px',color:'var(--muted)',fontWeight:400}}>{age}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {classLevelIsSet && (!activeAssignmentSubject ? (
                 /* ── HOME VIEW: Age group header + expandable subject cards ── */
                 <>
                   <div className="main-top">
@@ -2623,7 +2729,7 @@ function PortalInner() {
                     t={t}
                   />
                 </>
-              )}
+              ))}
             </>)}
 
 
@@ -2680,9 +2786,12 @@ function PortalInner() {
             {tab==='profile' && (<>
               <div className="main-top">
                 <div><div className="pg-h">{t('p_profile_title')}</div><div className="pg-s">{t('p_profile_subtitle')}</div></div>
-                <button className="btn-outline" onClick={()=>setProfileEdit(!profileEdit)}><i className={`fa-solid ${profileEdit?'fa-xmark':'fa-pen'}`} /> {profileEdit?t('p_cancel'):t('p_edit_profile')}</button>
+                <button className="btn-outline" onClick={()=>setProfileEdit(!profileEdit)}>
+                  <i className={`fa-solid ${profileEdit?'fa-xmark':'fa-pen'}`} /> {profileEdit?t('p_cancel'):t('p_edit_profile')}
+                </button>
               </div>
               <div className="content">
+                {/* ── Account details card ── */}
                 <div className="card" style={{marginBottom:'20px'}}>
                   <div style={{display:'flex',alignItems:'center',gap:'20px',marginBottom:'28px',paddingBottom:'20px',borderBottom:'1px solid var(--border)'}}>
                     <div style={{width:'72px',height:'72px',borderRadius:'20px',background:'linear-gradient(135deg,var(--teal),#0099cc)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'28px',color:'#fff',flexShrink:0}}>
@@ -2697,106 +2806,177 @@ function PortalInner() {
                     </div>
                   </div>
                   <div className="card-t"><i className="fa-solid fa-id-card" /> {t('p_account_details')}</div>
-                  <form id="profile-edit-form">
+
+                  {/* Profile fields — controlled inputs when editing */}
+                  {profileEdit ? (
+                    <div>
+                      <div className="prof-g">
+                        {/* Class Level dropdown */}
+                        <div className="prof-field">
+                          <span className="prof-label">Class Level</span>
+                          <select
+                            id="pf-ClassLevel"
+                            defaultValue={profile.classLevel}
+                            className="prof-inp"
+                          >
+                            <option value="Class 1">Class 1 (Age 5–6)</option>
+                            <option value="Class 2">Class 2 (Age 6–7)</option>
+                            <option value="Class 3">Class 3 (Age 7–8)</option>
+                            <option value="Class 4">Class 4 (Age 8–9)</option>
+                            <option value="Class 5">Class 5 (Age 9–10)</option>
+                          </select>
+                        </div>
+                        {/* Email */}
+                        <div className="prof-field">
+                          <span className="prof-label">Email</span>
+                          <input id="pf-Email" type="email" className="prof-inp"
+                            defaultValue={PFIELDS.find(f=>f['Field Key']==='email')?.Value||''}
+                            placeholder="email@example.com" />
+                        </div>
+                        {/* Phone */}
+                        <div className="prof-field">
+                          <span className="prof-label">Phone</span>
+                          <input id="pf-Phone" type="tel" className="prof-inp"
+                            defaultValue={PFIELDS.find(f=>f['Field Key']==='phone')?.Value||''}
+                            placeholder="+91 98765 43210" />
+                        </div>
+                        {/* Address */}
+                        <div className="prof-field">
+                          <span className="prof-label">Address</span>
+                          <input id="pf-Address" className="prof-inp"
+                            defaultValue={PFIELDS.find(f=>f['Field Key']==='address')?.Value||''}
+                            placeholder="Your address" />
+                        </div>
+                      </div>
+                      <div style={{marginTop:'20px',display:'flex',gap:'10px',flexWrap:'wrap'}}>
+                        <button
+                          className="btn-t"
+                          disabled={saving==='profile'}
+                          onClick={async () => {
+                            const classLevelEl = document.getElementById('pf-ClassLevel');
+                            const emailEl      = document.getElementById('pf-Email');
+                            const phoneEl      = document.getElementById('pf-Phone');
+                            const addressEl    = document.getElementById('pf-Address');
+                            const updates = {
+                              studentId:  profile.id,
+                              classLevel: classLevelEl?.value,
+                              email:      emailEl?.value,
+                              phone:      phoneEl?.value,
+                              address:    addressEl?.value,
+                            };
+                            setSaving('profile');
+                            try {
+                              const r = await fetch('/api/student/profile', {
+                                method:  'POST',
+                                headers: {'Content-Type':'application/json'},
+                                body:    JSON.stringify(updates),
+                              });
+                              const data = await r.json();
+                              if (data.success) {
+                                // Update React state AND localStorage immediately
+                                const newClass = classLevelEl?.value;
+                                setProfile(p => {
+                                  const updated = { ...p, classLevel: newClass || p.classLevel };
+                                  try { localStorage.setItem('vedanta_profile', JSON.stringify(updated)); } catch {}
+                                  return updated;
+                                });
+                                setProfileEdit(false);
+                                alert('Profile saved successfully!');
+                              } else {
+                                alert('Save failed: ' + (data.message || 'Unknown error'));
+                              }
+                            } catch (err) {
+                              alert('Save failed: ' + err.message);
+                            } finally {
+                              setSaving(null);
+                            }
+                          }}
+                        >
+                          {saving==='profile'
+                            ? <><i className="fa-solid fa-circle-notch fa-spin" /> Saving…</>
+                            : <><i className="fa-solid fa-check" /> {t('p_save_changes')}</>}
+                        </button>
+                        <button className="btn-outline" style={{padding:'11px 18px'}} onClick={()=>setProfileEdit(false)}>
+                          <i className="fa-solid fa-xmark" /> {t('p_cancel')}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Read-only display */
                     <div className="prof-g">
-                      {mergedProfile.map((f,i)=>(
+                      <div className="prof-field"><span className="prof-label">{t('p_full_name')}</span><span className="prof-val">{profile.name}</span></div>
+                      <div className="prof-field"><span className="prof-label">{t('p_student_id')}</span><span className="prof-val">{profile.id}</span></div>
+                      <div className="prof-field"><span className="prof-label">Class Level</span><span className="prof-val">{profile.classLevel}</span></div>
+                      {PFIELDS.filter(f=>f.Visible!==false&&f['Field Key']!=='class_level').map((f,i)=>(
                         <div key={i} className="prof-field">
-                          <span className="prof-label">{f.label}</span>
-                          {profileEdit && !f.readonly
-                            ? f.fieldKey === 'ClassLevel'
-                              ? (
-                                /* Dropdown for class level — prevents free-text typos that
-                                   would break the age-group mapping in the Assignments tab */
-                                <select
-                                  name={f.fieldKey}
-                                  defaultValue={f.val}
-                                  className="prof-inp"
-                                >
-                                  <option value="Class 1">Class 1 (Age 5–6)</option>
-                                  <option value="Class 2">Class 2 (Age 6–7)</option>
-                                  <option value="Class 3">Class 3 (Age 7–8)</option>
-                                  <option value="Class 4">Class 4 (Age 8–9)</option>
-                                  <option value="Class 5">Class 5 (Age 9–10)</option>
-                                </select>
-                              )
-                              : <input
-                                  name={f.fieldKey || f.label.toLowerCase().replace(/\s+/g,'_')}
-                                  defaultValue={f.val}
-                                  className="prof-inp"
-                                />
-                            : <span className="prof-val">{f.val}</span>}
+                          <span className="prof-label">{f.Label}</span>
+                          <span className="prof-val">{f.Value||'—'}</span>
                         </div>
                       ))}
                     </div>
-                  </form>
-                  {profileEdit && (
-                    <div style={{marginTop:'24px',display:'flex',gap:'10px',flexWrap:'wrap'}}>
-                      <button
-                        className="btn-t"
-                        disabled={!!saving}
-                        onClick={async () => {
-                          // Read all edited values from the form
-                          const form = document.getElementById('profile-edit-form');
-                          if (!form) return;
-                          const fd = new FormData(form);
-                          // Build the updates object from field keys defined in mergedProfile
-                          const updates = {};
-                          mergedProfile.forEach(f => {
-                            if (f.readonly) return;
-                            const key = f.fieldKey || f.label.toLowerCase().replace(/\s+/g,'_');
-                            const val = fd.get(key);
-                            if (val !== null) updates[f.fieldKey || key] = val;
-                          });
-                          setSaving('profile');
-                          try {
-                            const r = await fetch('/api/student/profile', {
-                              method: 'POST',
-                              headers: {'Content-Type':'application/json'},
-                              body: JSON.stringify({ studentId: profile.id, ...updates }),
-                            });
-                            const data = await r.json();
-                            if (data.success) {
-                              // Update profile state immediately so the UI
-                              // reflects the change without a page reload.
-                              // classLevel is the critical one — it drives the
-                              // age group shown on the Assignments tab.
-                              if (updates.ClassLevel || updates.class_level) {
-                                const newClass = updates.ClassLevel || updates.class_level;
-                                setProfile(p => ({ ...p, classLevel: newClass }));
-                              }
-                              if (updates.FullName || updates.full_name) {
-                                const newName = updates.FullName || updates.full_name;
-                                setProfile(p => ({ ...p, name: newName }));
-                              }
-                              setProfileEdit(false);
-                            } else {
-                              alert('Could not save: ' + (data.message || 'Unknown error'));
-                            }
-                          } catch (err) {
-                            alert('Save failed: ' + err.message);
-                          } finally {
-                            setSaving(null);
-                          }
-                        }}
-                      >
-                        {saving==='profile'
-                          ? <><i className="fa-solid fa-circle-notch fa-spin" /> Saving…</>
-                          : <><i className="fa-solid fa-check" /> {t('p_save_changes')}</>}
-                      </button>
-                      <button className="btn-outline" onClick={()=>setProfileEdit(false)} style={{padding:'11px 18px'}}>
-                        <i className="fa-solid fa-xmark" /> {t('p_cancel')}
-                      </button>
-                    </div>
                   )}
                 </div>
+
+                {/* ── Password change card ── */}
                 <div className="card">
                   <div className="card-t"><i className="fa-solid fa-lock" /> {t('p_change_password')}</div>
                   <div className="prof-g">
-                    <div className="prof-field"><span className="prof-label">{t('p_current_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
-                    <div className="prof-field"><span className="prof-label">{t('p_new_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
-                    <div className="prof-field"><span className="prof-label">{t('p_confirm_password')}</span><input type="password" className="prof-inp" placeholder="••••••••" /></div>
+                    <div className="prof-field">
+                      <span className="prof-label">{t('p_current_password')}</span>
+                      <input id="pw-current" type="password" className="prof-inp" placeholder="••••••••" />
+                    </div>
+                    <div className="prof-field">
+                      <span className="prof-label">{t('p_new_password')}</span>
+                      <input id="pw-new" type="password" className="prof-inp" placeholder="Min. 6 characters" />
+                    </div>
+                    <div className="prof-field">
+                      <span className="prof-label">{t('p_confirm_password')}</span>
+                      <input id="pw-confirm" type="password" className="prof-inp" placeholder="Repeat new password" />
+                    </div>
                   </div>
-                  <div style={{marginTop:'20px'}}><button className="btn-t"><i className="fa-solid fa-key" /> {t('p_update_password')}</button></div>
+                  <div style={{marginTop:'20px'}}>
+                    <button
+                      className="btn-t"
+                      disabled={saving==='password'}
+                      onClick={async () => {
+                        const curr    = document.getElementById('pw-current')?.value?.trim();
+                        const newPw   = document.getElementById('pw-new')?.value?.trim();
+                        const confirm = document.getElementById('pw-confirm')?.value?.trim();
+                        if (!curr || !newPw || !confirm) { alert('Please fill in all three password fields.'); return; }
+                        if (newPw !== confirm)            { alert('New passwords do not match.');               return; }
+                        if (newPw.length < 6)             { alert('New password must be at least 6 characters.'); return; }
+                        setSaving('password');
+                        try {
+                          const r = await fetch('/api/student/profile', {
+                            method:  'POST',
+                            headers: {'Content-Type':'application/json'},
+                            body:    JSON.stringify({
+                              studentId:       profile.id,
+                              currentPassword: curr,
+                              newPassword:     newPw,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (data.success) {
+                            document.getElementById('pw-current').value = '';
+                            document.getElementById('pw-new').value     = '';
+                            document.getElementById('pw-confirm').value = '';
+                            alert('Password changed successfully! Use your new password next time you log in.');
+                          } else {
+                            alert('Password change failed: ' + (data.message || 'Unknown error'));
+                          }
+                        } catch (err) {
+                          alert('Password change failed: ' + err.message);
+                        } finally {
+                          setSaving(null);
+                        }
+                      }}
+                    >
+                      {saving==='password'
+                        ? <><i className="fa-solid fa-circle-notch fa-spin" /> Updating…</>
+                        : <><i className="fa-solid fa-key" /> {t('p_update_password')}</>}
+                    </button>
+                  </div>
                 </div>
               </div>
             </>)}
