@@ -853,10 +853,12 @@ function PortalInner() {
   const [uploadName,  setUploadName]  = useState('');
   const [uploadDone,  setUploadDone]  = useState(false);
   const [profileEdit, setProfileEdit] = useState(false);
+  const [saving,      setSaving]      = useState(null); // 'profile' | 'password' | null
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notifs,      setNotifs]      = useState(FALLBACK.notifications.filter(n=>isRowActive(n.Active)));
   const [activeModuleId, setActiveModuleId] = useState(null);
   const [activeAssignmentSubject, setActiveAssignmentSubject] = useState(null);
+  const [expandedSubject, setExpandedSubject] = useState(null); // age-group expandable card
   const [learnProgress,  setLearnProgress]  = useState({});
   const [leaderboard,    setLeaderboard]    = useState({ overall:[], bySubject:{} });
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
@@ -981,6 +983,312 @@ function PortalInner() {
   const LMOD    = (cfg.learningModules||[]).filter(m=>isRowActive(m.Active)).sort((a,b)=>(Number(a['Display Order'])||0)-(Number(b['Display Order'])||0));
   const ALLLSTEPS = (cfg.learningSteps||[]).filter(s=>isRowActive(s.Active));
   const stepsFor = moduleId => ALLLSTEPS.filter(s=>s['Module ID']===moduleId).sort((a,b)=>(Number(a['Step Number'])||0)-(Number(b['Step Number'])||0));
+
+  // ── AGE-GROUP CURRICULUM SYSTEM ─────────────────────────────────────────────
+  //
+  // Maps the student's existing classLevel (Class 1 – Class 5) to an age group
+  // and defines which subjects + topics exist for that age group. This is purely
+  // a display/organisation layer — all underlying progress data (learnProgress,
+  // StudentProgress sheet rows) continues to use Module IDs and original subject
+  // names, so nothing is lost. The mapping is additive: new subjects can be added
+  // here without touching any other code.
+
+  // Class level → age group label
+  const CLASS_TO_AGE = {
+    'Class 1': 'Age 5–6', 'class1': 'Age 5–6', 'KG': 'Age 5–6',
+    'Class 2': 'Age 6–7', 'class2': 'Age 6–7',
+    'Class 3': 'Age 7–8', 'class3': 'Age 7–8',
+    'Class 4': 'Age 8–9', 'class4': 'Age 8–9',
+    'Class 5': 'Age 9–10','class5': 'Age 9–10',
+  };
+  const studentAgeGroup = CLASS_TO_AGE[profile.classLevel] || CLASS_TO_AGE['Class 3'];
+
+  // Backward-compatible subject name mapping.
+  // Old module Subject values → canonical display subject names.
+  // Used when computing progress stats from learnProgress so old data
+  // (recorded before this restructure) still counts correctly.
+  const SUBJECT_ALIAS = {
+    'English Grammar': 'English',
+    'Science':         'Science / EVS',
+    'Mathematics':     'Mathematics',
+    'Social Studies':  'Social Studies',
+    'General Knowledge': 'General Knowledge',
+    // forward map (for lookup in the other direction)
+    'English':         'English Grammar',
+    'Science / EVS':   'Science',
+    'EVS':             'Science',
+  };
+
+  // Full CBSE curriculum by age group.
+  // Each subject has:
+  //   key          — canonical name used in subject cards and for filtering
+  //   aliases      — old Subject values that map to this subject (for progress lookup)
+  //   icon/emoji/color — visual identity
+  //   tagline      — subtitle on the card
+  //   topics       — topic tree for the expandable card (name + subtopics[])
+  //   comingSoon   — true if no quiz content exists yet (shows placeholder)
+  //   minAge       — only show this subject for age groups >= this (for scalability)
+  const AGE_CURRICULUM = {
+    'Age 5–6': {
+      label: 'Age 5–6 Years',
+      classEquiv: 'Class 1',
+      subjects: [
+        { key:'English', aliases:['English Grammar','English'], icon:'fa-book-open', emoji:'📖', color:'#3b82f6', tagline:'Alphabet, Phonics & Reading',
+          topics:[
+            { name:'Alphabet', subtopics:['Capital Letters','Small Letters','Letter Sounds'] },
+            { name:'Phonics',  subtopics:['Short Vowels','Blending Sounds','CVC Words']     },
+            { name:'Vowels & Consonants', subtopics:['Identifying Vowels','Consonant Sounds'] },
+            { name:'Sight Words',   subtopics:['Dolch Words Level 1','Flash Card Practice']  },
+            { name:'Reading Skills',subtopics:['Picture Reading','Simple Stories']           },
+            { name:'Simple Sentences', subtopics:['Subject & Predicate','Writing Sentences'] },
+          ]},
+        { key:'Mathematics', aliases:['Mathematics','Maths'], icon:'fa-calculator', emoji:'🔢', color:'#f97316', tagline:'Numbers, Counting & Shapes',
+          topics:[
+            { name:'Numbers 1–100', subtopics:['Counting Forward','Counting Backward','Number Names'] },
+            { name:'Counting',      subtopics:['Objects & Numbers','Skip Counting by 2s & 5s']        },
+            { name:'Addition',      subtopics:['Adding Single Digits','Adding with Pictures']          },
+            { name:'Subtraction',   subtopics:['Taking Away','Subtraction on Number Line']            },
+            { name:'Shapes',        subtopics:['2D Shapes','3D Shapes','Sorting by Shape']            },
+            { name:'Patterns',      subtopics:['AB Patterns','ABC Patterns','Shape Patterns']         },
+          ]},
+        { key:'Hindi', aliases:['Hindi'], icon:'fa-language', emoji:'🇮🇳', color:'#ef4444', tagline:'स्वर, व्यंजन और मात्राएँ', comingSoon:true,
+          topics:[
+            { name:'स्वर',    subtopics:['अ आ इ ई','उ ऊ ए ऐ','ओ औ अं अः'] },
+            { name:'व्यंजन',  subtopics:['क वर्ग','च वर्ग','ट वर्ग','त वर्ग','प वर्ग'] },
+            { name:'मात्राएँ',subtopics:['आ की मात्रा','इ ई की मात्रा','उ ऊ की मात्रा'] },
+          ]},
+        { key:'EVS', aliases:['Science','EVS','Science / EVS'], icon:'fa-leaf', emoji:'🌿', color:'#22c55e', tagline:'Myself, Family & Environment',
+          topics:[
+            { name:'Myself',  subtopics:['My Body Parts','My Senses','I am Special'] },
+            { name:'Family',  subtopics:['My Family Members','Family Relationships']  },
+            { name:'Plants',  subtopics:['Parts of a Plant','Uses of Plants']         },
+            { name:'Animals', subtopics:['Pet Animals','Wild Animals','Farm Animals'] },
+          ]},
+      ],
+    },
+    'Age 6–7': {
+      label: 'Age 6–7 Years',
+      classEquiv: 'Class 2',
+      subjects: [
+        { key:'English', aliases:['English Grammar','English'], icon:'fa-book-open', emoji:'📖', color:'#3b82f6', tagline:'Grammar, Vocabulary & Writing',
+          topics:[
+            { name:'Nouns',          subtopics:['Common Nouns','Proper Nouns','Singular & Plural'] },
+            { name:'Verbs',          subtopics:['Action Words','Doing Words in Sentences']         },
+            { name:'Adjectives',     subtopics:['Describing Words','Colours & Sizes']              },
+            { name:'Sentence Types', subtopics:['Statements','Questions','Exclamations']           },
+            { name:'Comprehension',  subtopics:['Reading Passages','Answering Questions']          },
+            { name:'Creative Writing',subtopics:['Picture Composition','Short Paragraphs']        },
+          ]},
+        { key:'Mathematics', aliases:['Mathematics','Maths'], icon:'fa-calculator', emoji:'🔢', color:'#f97316', tagline:'Numbers up to 1000, Tables & Fractions',
+          topics:[
+            { name:'Numbers up to 1000', subtopics:['Place Value','Comparing Numbers','Ordering'] },
+            { name:'Multiplication',     subtopics:['Tables 2–5','Multiplication Facts']          },
+            { name:'Division',           subtopics:['Equal Groups','Simple Division']             },
+            { name:'Fractions',          subtopics:['Half & Quarter','Equal Parts']               },
+            { name:'Measurement',        subtopics:['Length','Weight','Capacity']                 },
+            { name:'Time',               subtopics:['Hours & Minutes','Reading a Clock']          },
+          ]},
+        { key:'Hindi', aliases:['Hindi'], icon:'fa-language', emoji:'🇮🇳', color:'#ef4444', tagline:'बारहखड़ी और शब्द निर्माण', comingSoon:true,
+          topics:[
+            { name:'बारहखड़ी',    subtopics:['क से ज्ञ तक बारहखड़ी'] },
+            { name:'शब्द निर्माण',subtopics:['दो अक्षर के शब्द','तीन अक्षर के शब्द'] },
+            { name:'वाक्य',       subtopics:['छोटे वाक्य','प्रश्न वाक्य'] },
+          ]},
+        { key:'EVS', aliases:['Science','EVS','Science / EVS'], icon:'fa-leaf', emoji:'🌿', color:'#22c55e', tagline:'Our Community & Environment',
+          topics:[
+            { name:'Our Food',      subtopics:['Food Sources','Healthy Eating'] },
+            { name:'Our Clothes',   subtopics:['Seasonal Clothes','Fabrics']    },
+            { name:'Our Home',      subtopics:['Types of Houses','Rooms']       },
+            { name:'Transport',     subtopics:['Land','Water','Air Transport']  },
+          ]},
+      ],
+    },
+    'Age 7–8': {
+      label: 'Age 7–8 Years',
+      classEquiv: 'Class 3',
+      subjects: [
+        { key:'English', aliases:['English Grammar','English'], icon:'fa-book-open', emoji:'📖', color:'#3b82f6', tagline:'Grammar, Reading & Composition',
+          topics:[
+            { name:'Nouns & Pronouns',   subtopics:['Nouns Review','Personal Pronouns','Possessive Pronouns'] },
+            { name:'Verbs & Tenses',     subtopics:['Simple Present','Simple Past','Future Tense'] },
+            { name:'Adjectives & Adverbs',subtopics:['Degrees of Comparison','Adverbs of Manner'] },
+            { name:'Punctuation',        subtopics:['Full Stop','Comma','Question Mark','Apostrophe'] },
+            { name:'Reading Skills',     subtopics:['Comprehension','Finding Main Idea','Inference'] },
+            { name:'Writing Skills',     subtopics:['Letter Writing','Paragraph Writing','Diary Entry'] },
+          ]},
+        { key:'Mathematics', aliases:['Mathematics','Maths'], icon:'fa-calculator', emoji:'🔢', color:'#f97316', tagline:'Large Numbers, Fractions & Data',
+          topics:[
+            { name:'Numbers up to 10,000', subtopics:['Place Value','Roman Numerals','Rounding'] },
+            { name:'Fractions',            subtopics:['Equivalent Fractions','Comparing Fractions','Adding Fractions'] },
+            { name:'Decimals Intro',       subtopics:['Tenths','Hundredths','Comparing Decimals'] },
+            { name:'Geometry',             subtopics:['Lines & Angles','Triangles','Quadrilaterals'] },
+            { name:'Data Handling',        subtopics:['Tally Charts','Pictographs','Bar Graphs'] },
+            { name:'Multiplication & Division', subtopics:['Tables up to 12','Long Division'] },
+          ]},
+        { key:'Hindi', aliases:['Hindi'], icon:'fa-language', emoji:'🇮🇳', color:'#ef4444', tagline:'व्याकरण और रचना', comingSoon:true,
+          topics:[
+            { name:'संज्ञा',   subtopics:['व्यक्तिवाचक','जातिवाचक','भाववाचक'] },
+            { name:'सर्वनाम',  subtopics:['पुरुषवाचक','निजवाचक'] },
+            { name:'क्रिया',   subtopics:['सकर्मक','अकर्मक'] },
+            { name:'रचना',     subtopics:['अनुच्छेद','पत्र लेखन'] },
+          ]},
+        { key:'Science', aliases:['Science','Science / EVS'], icon:'fa-flask', emoji:'🔬', color:'#22c55e', tagline:'Plants, Animals & The Physical World',
+          topics:[
+            { name:'Plant Life Cycle',  subtopics:['Parts of a Plant','Seed Germination','Photosynthesis'] },
+            { name:'Animal Kingdom',    subtopics:['Classification','Adaptation','Food Chains'] },
+            { name:'Human Body',        subtopics:['Organs','Skeletal System','Digestive System'] },
+            { name:'Water',             subtopics:['Water Cycle','Uses of Water','Conservation'] },
+            { name:'Air & Atmosphere',  subtopics:['Composition of Air','Wind','Weather'] },
+            { name:'Simple Machines',   subtopics:['Lever','Pulley','Inclined Plane'] },
+          ]},
+        { key:'Computer', aliases:['Computer','ICT'], icon:'fa-laptop', emoji:'💻', color:'#6366f1', tagline:'Basics of Computing & Technology', comingSoon:true,
+          topics:[
+            { name:'Introduction to Computers', subtopics:['Parts of a Computer','Input & Output Devices'] },
+            { name:'Using a Keyboard',          subtopics:['Home Row Keys','Typing Practice'] },
+            { name:'MS Paint',                  subtopics:['Drawing Tools','Colouring','Saving a File'] },
+          ]},
+      ],
+    },
+    'Age 8–9': {
+      label: 'Age 8–9 Years',
+      classEquiv: 'Class 4',
+      subjects: [
+        { key:'English', aliases:['English Grammar','English'], icon:'fa-book-open', emoji:'📖', color:'#3b82f6', tagline:'Advanced Grammar & Literature',
+          topics:[
+            { name:'Parts of Speech Review', subtopics:['Nouns','Pronouns','Verbs','Adjectives','Adverbs','Prepositions'] },
+            { name:'Tenses',                 subtopics:['Simple','Continuous','Perfect Tenses'] },
+            { name:'Voice & Speech',         subtopics:['Active & Passive','Direct & Indirect Speech'] },
+            { name:'Comprehension',          subtopics:['Prose Passages','Poetry Appreciation'] },
+            { name:'Composition',            subtopics:['Essay Writing','Story Writing','Notice Writing'] },
+            { name:'Vocabulary',             subtopics:['Synonyms','Antonyms','Idioms','Proverbs'] },
+          ]},
+        { key:'Mathematics', aliases:['Mathematics','Maths'], icon:'fa-calculator', emoji:'🔢', color:'#f97316', tagline:'Integers, Algebra & Mensuration',
+          topics:[
+            { name:'Large Numbers',    subtopics:['Crores & Millions','Operations on Large Numbers'] },
+            { name:'Factors & Multiples', subtopics:['HCF','LCM','Prime Factorisation'] },
+            { name:'Fractions & Decimals', subtopics:['All Operations','Word Problems'] },
+            { name:'Percentage',       subtopics:['Percent Concept','Profit & Loss','Discount'] },
+            { name:'Algebra Intro',    subtopics:['Variables','Simple Equations','Substitution'] },
+            { name:'Area & Perimeter', subtopics:['Rectangle','Square','Triangle','Complex Shapes'] },
+          ]},
+        { key:'Hindi', aliases:['Hindi'], icon:'fa-language', emoji:'🇮🇳', color:'#ef4444', tagline:'उन्नत व्याकरण और साहित्य', comingSoon:true,
+          topics:[
+            { name:'विशेषण',   subtopics:['गुणवाचक','परिमाणवाचक','संख्यावाचक'] },
+            { name:'काल',      subtopics:['भूतकाल','वर्तमान काल','भविष्यकाल'] },
+            { name:'मुहावरे',  subtopics:['प्रचलित मुहावरे','वाक्य में प्रयोग'] },
+            { name:'निबंध',    subtopics:['वर्णनात्मक','विचारात्मक','कथात्मक'] },
+          ]},
+        { key:'Science', aliases:['Science','Science / EVS'], icon:'fa-flask', emoji:'🔬', color:'#22c55e', tagline:'Biology, Physics & Chemistry Basics',
+          topics:[
+            { name:'Crops & Agriculture', subtopics:['Kharif & Rabi Crops','Irrigation','Fertilisers'] },
+            { name:'Microorganisms',      subtopics:['Bacteria','Viruses','Fungi','Useful & Harmful'] },
+            { name:'Force & Pressure',    subtopics:['Contact & Non-Contact Forces','Pressure','Friction'] },
+            { name:'Light',               subtopics:['Sources','Reflection','Shadows'] },
+            { name:'Combustion',          subtopics:['Types of Combustion','Fuels','Fire Safety'] },
+            { name:'Conservation',        subtopics:['Natural Resources','Pollution','Sustainable Living'] },
+          ]},
+        { key:'Social Studies', aliases:['Social Studies','Geography','History'], icon:'fa-earth-asia', emoji:'🌍', color:'#eab308', tagline:'History, Geography & Civics',
+          topics:[
+            { name:'Our Country India',  subtopics:['Physical Features','States & Capitals','Climate'] },
+            { name:'Indian History',     subtopics:['Ancient Civilisations','Medieval India','Freedom Movement'] },
+            { name:'Government',         subtopics:['Democracy','Constitution','Rights & Duties'] },
+            { name:'Maps & Globe',       subtopics:['Latitudes & Longitudes','Map Reading','Time Zones'] },
+            { name:'Natural Resources',  subtopics:['Minerals','Forests','Water Resources'] },
+          ]},
+        { key:'Computer', aliases:['Computer','ICT'], icon:'fa-laptop', emoji:'💻', color:'#6366f1', tagline:'MS Office, Internet & Safety', comingSoon:true,
+          topics:[
+            { name:'MS Word',     subtopics:['Formatting Text','Tables','Mail Merge'] },
+            { name:'MS Excel',    subtopics:['Spreadsheet Basics','Formulas','Charts'] },
+            { name:'Internet',    subtopics:['WWW','Browsers','Email','Online Safety'] },
+          ]},
+      ],
+    },
+    'Age 9–10': {
+      label: 'Age 9–10 Years',
+      classEquiv: 'Class 5',
+      subjects: [
+        { key:'English', aliases:['English Grammar','English'], icon:'fa-book-open', emoji:'📖', color:'#3b82f6', tagline:'Literature, Grammar & Advanced Writing',
+          topics:[
+            { name:'Grammar Mastery',   subtopics:['All Parts of Speech','Clauses & Phrases','Complex Sentences'] },
+            { name:'Literature',        subtopics:['Prose Analysis','Poetry','Drama Excerpts'] },
+            { name:'Writing Skills',    subtopics:['Formal Letters','Report Writing','Creative Writing','Debate'] },
+            { name:'Reading Comprehension', subtopics:['Unseen Passages','Inference','Critical Thinking'] },
+            { name:'Vocabulary',        subtopics:['Word Roots','Prefixes & Suffixes','Advanced Idioms'] },
+            { name:'Nouns',             subtopics:['All Types of Nouns','Case of Nouns'] },
+          ]},
+        { key:'Mathematics', aliases:['Mathematics','Maths'], icon:'fa-calculator', emoji:'🔢', color:'#f97316', tagline:'Integers, Fractions, Algebra & Geometry',
+          topics:[
+            { name:'The Fish Tale',         subtopics:['Large Numbers','Estimation','Place Value'] },
+            { name:'Shapes and Angles',     subtopics:['Types of Angles','Measuring Angles','Polygons'] },
+            { name:'Parts and Wholes',      subtopics:['Fractions','Equivalent Fractions','Fraction Operations'] },
+            { name:'Factors and Multiples', subtopics:['Factors','Multiples','LCM','HCF'] },
+            { name:'Decimals',              subtopics:['Decimal Place Value','Operations','Conversion'] },
+            { name:'Area and Perimeter',    subtopics:['Rectangle','Square','Composite Shapes'] },
+            { name:'Charts and Graphs',     subtopics:['Data Collection','Bar Graphs','Pictographs'] },
+            { name:'Multiplication & Division', subtopics:['Multi-digit','Long Division','Word Problems'] },
+            { name:'Measurement',           subtopics:['Length','Weight','Capacity','Unit Conversion'] },
+          ]},
+        { key:'Hindi', aliases:['Hindi'], icon:'fa-language', emoji:'🇮🇳', color:'#ef4444', tagline:'उच्च स्तरीय हिंदी व्याकरण', comingSoon:true,
+          topics:[
+            { name:'व्याकरण',   subtopics:['समास','संधि','प्रत्यय','उपसर्ग'] },
+            { name:'काव्य',     subtopics:['कविता पाठ','भाव-विस्तार','कवि परिचय'] },
+            { name:'गद्य',      subtopics:['गद्यांश','प्रश्नोत्तर','लेखक परिचय'] },
+            { name:'रचना',      subtopics:['पत्र','निबंध','कहानी लेखन'] },
+          ]},
+        { key:'Science', aliases:['Science','Science / EVS'], icon:'fa-flask', emoji:'🔬', color:'#22c55e', tagline:'Advanced Biology, Physics & Chemistry',
+          topics:[
+            { name:'Plant Life Cycle',  subtopics:['Germination','Photosynthesis','Reproduction'] },
+            { name:'Solar System',      subtopics:['Planets','Moon Phases','Stars & Galaxies'] },
+            { name:'Water Cycle',       subtopics:['Evaporation','Condensation','Rainfall'] },
+            { name:'Human Body',        subtopics:['Organ Systems','Nutrition','Disease Prevention'] },
+            { name:'Matter & Materials',subtopics:['States of Matter','Properties','Changes'] },
+            { name:'Electricity',       subtopics:['Circuits','Conductors & Insulators','Safety'] },
+          ]},
+        { key:'Social Studies', aliases:['Social Studies','Geography','History'], icon:'fa-earth-asia', emoji:'🌍', color:'#eab308', tagline:'Advanced History, Geography & Civics',
+          topics:[
+            { name:'The Earth',           subtopics:['Layers of Earth','Landforms','Oceans'] },
+            { name:'Indian Geography',    subtopics:['Physical Divisions','Rivers','Climate Zones'] },
+            { name:'History of India',    subtopics:['Mughal Empire','British Rule','Independence'] },
+            { name:'Civics',              subtopics:['Parliament','State Government','Local Bodies'] },
+            { name:'Economic Geography',  subtopics:['Agriculture','Industries','Trade'] },
+          ]},
+        { key:'Computer', aliases:['Computer','ICT'], icon:'fa-laptop', emoji:'💻', color:'#6366f1', tagline:'Programming, Internet & Digital Literacy', comingSoon:true,
+          topics:[
+            { name:'Programming Basics', subtopics:['Scratch Introduction','Algorithms','Simple Programs'] },
+            { name:'Database Concepts',  subtopics:['What is a Database','MS Access Basics'] },
+            { name:'Networking',         subtopics:['LAN & WAN','Internet Infrastructure','Cloud Computing'] },
+            { name:'Cyber Safety',       subtopics:['Password Safety','Phishing','Digital Footprint'] },
+          ]},
+      ],
+    },
+  };
+
+  // ── Derive the current student's subject list from their age group ───────────
+  // This replaces ASGN_SUBJ (the old flat subject list from cfg.assignmentSubjects).
+  // AGE_SUBJECTS is the canonical list of subjects for THIS student's age group.
+  const currentCurriculum = AGE_CURRICULUM[studentAgeGroup] || AGE_CURRICULUM['Age 7–8'];
+  const AGE_SUBJECTS = currentCurriculum.subjects;
+
+  // ── topicsForSubject: match modules by key + all aliases ────────────────────
+  // Backward compatible — old modules tagged Subject:'English Grammar' are
+  // matched by the English subject card's aliases list.
+  const topicsForSubjectKey = subjectKey => {
+    const subj = AGE_SUBJECTS.find(s => s.key === subjectKey);
+    if (!subj) return [];
+    const aliases = new Set([subjectKey, ...(subj.aliases || [])]);
+    return LMOD.filter(m => aliases.has(m.Subject));
+  };
+
+  // ── Age-group-aware subjectStats ────────────────────────────────────────────
+  const ageSubjectStats = subjectKey => {
+    const topics = topicsForSubjectKey(subjectKey);
+    const completed = topics.filter(m => learnProgress[m['Module ID']]?.completedAt).length;
+    const attempted = topics.reduce((s,m) => s+(learnProgress[m['Module ID']]?.attempted||0),0);
+    const correct   = topics.reduce((s,m) => s+(learnProgress[m['Module ID']]?.correct||0),0);
+    const pct = topics.length ? Math.round((completed/topics.length)*100) : 0;
+    return { total: topics.length, completed, remaining: topics.length-completed, pct, attempted, correct };
+  };
+
   // Step 1 of the drill-down: subjects come from their own config rows, but the
   // topic COUNT and progress shown on each subject card is always computed live
   // from LMOD — so a brand-new subject just needs a row here + topic rows above,
@@ -1068,12 +1376,18 @@ function PortalInner() {
   // started is already complete) — the button still works in that case, it
   // just opens the Assignments subject picker instead.
   const resumeTarget = (() => {
-    let best = null; // { subjectName, moduleId, lastTs }
+    // Only find in-progress modules that belong to THIS student's age group.
+    const ageModuleIds = new Set(AGE_SUBJECTS.flatMap(s => topicsForSubjectKey(s.key).map(m=>m['Module ID'])));
+    let best = null;
     LMOD.forEach(m => {
+      if (!ageModuleIds.has(m['Module ID'])) return; // not in this student's age group
       const p = learnProgress[m['Module ID']];
-      if (!p?.startedAt || p?.completedAt) return; // only "in progress" modules
+      if (!p?.startedAt || p?.completedAt) return;
       const ts = p.startedAt;
-      if (!best || ts > best.lastTs) best = { subjectName: m.Subject, moduleId: m['Module ID'], lastTs: ts };
+      // Map the module's Subject to the correct age-group subject key for navigation
+      const subjEntry = AGE_SUBJECTS.find(s=>s.key===m.Subject||(s.aliases||[]).includes(m.Subject));
+      const subjectName = subjEntry?.key || m.Subject;
+      if (!best || ts > best.lastTs) best = { subjectName, moduleId: m['Module ID'], lastTs: ts };
     });
     return best;
   })();
@@ -1418,7 +1732,18 @@ function PortalInner() {
     /* Enhanced assignment item */
     .asgn-item-v2{align-items:flex-start;flex-direction:column;gap:0;}
     .asgn-item-v2 .asgn-dot{flex-shrink:0;margin-top:4px;align-self:flex-start;}
-    @media(max-width:640px){.asgn-summary-strip{grid-template-columns:repeat(2,1fr);}}
+    /* Age-group expandable subject cards */
+    .age-subj-card{background:var(--surf);border:1px solid var(--border);border-radius:16px;margin-bottom:12px;overflow:hidden;transition:border-color .2s;}
+    .age-subj-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px 0;cursor:pointer;user-select:none;}
+    .age-subj-header:hover{background:rgba(255,255,255,.015);}
+    .age-subj-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;}
+    .age-subj-name{font-family:var(--fd);font-size:17px;font-weight:900;color:#fff;}
+    .age-coming-soon{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 8px;border-radius:100px;background:rgba(99,102,241,.2);color:#818cf8;border:1px solid rgba(99,102,241,.3);}
+    .age-subj-expanded{transition:all .2s;}
+    @media(max-width:640px){
+      .asgn-summary-strip{grid-template-columns:repeat(2,1fr);}
+      .age-subj-header{flex-wrap:wrap;}
+    }
     .upload-zone{border:2px dashed rgba(255,255,255,.12);border-radius:var(--r);padding:36px;text-align:center;transition:all .2s;cursor:pointer;display:block;}
     .upload-zone:hover{border-color:var(--teal);background:rgba(0,198,167,.04);}
     .sch-item{background:var(--surf2);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:12px;display:flex;align-items:center;gap:16px;}
@@ -1577,9 +1902,24 @@ function PortalInner() {
   `;
 
   const mergedProfile = [
-    { label:t('p_full_name'),  val:profile.name,  readonly:true },
-    { label:t('p_student_id'), val:profile.id,    readonly:true },
-    ...PFIELDS.map(f => ({ label:f.Label, val:f.Value, readonly: f['Read-Only']==='Yes'||f['Read-Only']===true })),
+    { label:t('p_full_name'),  val:profile.name,  readonly:true,  fieldKey:'FullName'   },
+    { label:t('p_student_id'), val:profile.id,    readonly:true,  fieldKey:'StudentID'  },
+    ...PFIELDS.map(f => ({
+      label:    f.Label,
+      // For class_level, always use the live profile.classLevel value (set at
+      // login from the Accounts sheet) rather than the stale fallback string in
+      // PFIELDS.Value. This ensures the dropdown default reflects what's actually
+      // stored on the student's account, not the hardcoded 'Class 3' placeholder.
+      val:      f['Field Key'] === 'class_level' ? profile.classLevel : f.Value,
+      readonly: f['Read-Only']==='Yes'||f['Read-Only']===true,
+      fieldKey: ({
+        class_level:   'ClassLevel',
+        enrolled_date: 'EnrolledDate',
+        email:         'Email',
+        phone:         'Phone',
+        address:       'Address',
+      }[f['Field Key']] || f['Field Key']),
+    })),
   ];
 
   // ── RENDER ────────────────────────────────────────────────────────────────────
@@ -1879,205 +2219,397 @@ function PortalInner() {
                 to assignmentSubjects / learningModules / learningSteps above
                 (or their matching Sheet tabs once wired up). */}
             {tab==='assignments' && (<>
-              {/* STEP 1 — Subject selection (the section's home view) */}
-              {!activeAssignmentSubject && (
-                <div className="main-top"><div><div className="pg-h">{t('p_assignments_title')}</div><div className="pg-s">{t('p_assignments_subtitle')}</div></div></div>
-              )}
-              {/* STEP 2 / 3 — breadcrumb once a subject (and maybe a topic) is selected */}
-              {activeAssignmentSubject && (
-                <div className="asgn-breadcrumb">
-                  <span className="asgn-crumb" onClick={()=>{setActiveAssignmentSubject(null);setActiveModuleId(null);}}>{t('p_breadcrumb_assignments')}</span>
-                  <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
-                  {activeModuleId ? (
-                    <>
-                      <span className="asgn-crumb" onClick={()=>setActiveModuleId(null)}>{activeAssignmentSubject}</span>
-                      <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
-                      <span className="asgn-crumb-current">{LMOD.find(m=>m['Module ID']===activeModuleId)?.Title}</span>
-                    </>
-                  ) : (
-                    <span className="asgn-crumb-current">{activeAssignmentSubject}</span>
-                  )}
-                </div>
-              )}
+              {/* ── AGE-GROUP ASSIGNMENT DASHBOARD ──────────────────────────────
+                  Shows content for this student's age group only (derived from
+                  profile.classLevel). Each subject is an expandable card showing
+                  topics, progress, and quiz modules. Hindi/Computer show a
+                  "Coming Soon" state until sheet content is added. ── */}
 
               {!activeAssignmentSubject ? (
-                /* ── STEP 1: Subject grid + Homework (unchanged section) ── */
-                <div className="content">
-                  <div className="sec-divider" style={{marginTop:0}}>{t('p_choose_subject')}</div>
-                  <AssignmentSubjectsGrid subjects={ASGN_SUBJ} statsFor={subjectStats} onOpen={setActiveAssignmentSubject} t={t} />
-
-                  {/* ── PERSONALIZED ASSIGNMENT DASHBOARD ──────────────────────────
-                      Shows real assignments from the Assignments Sheet tab when
-                      available, falling back to the demo FALLBACK assignments.
-                      Features: status tracking with auto-Overdue detection,
-                      difficulty badges, due-date urgency colouring, progress
-                      summary strip, recommendations from weak quiz subjects,
-                      and inline homework submission. ── */}
-                  <div className="sec-divider">{t('p_homework_submissions')}</div>
-
-                  {/* Assignment summary strip */}
-                  {ASGN.length > 0 && (
-                    <div className="asgn-summary-strip">
-                      {[
-                        { label: 'Total',       val: ASGN.length,                                             color: 'var(--teal)'  },
-                        { label: 'Overdue',     val: ASGN.filter(a=>a.Status==='Overdue').length,             color: '#ef4444'       },
-                        { label: 'In Progress', val: ASGN.filter(a=>a.Status==='In Progress').length,         color: 'var(--accent)' },
-                        { label: 'Completed',   val: ASGN.filter(a=>['Completed','graded','submitted'].includes(a.Status)).length, color: '#22c55e' },
-                      ].map((s,i) => (
-                        <div key={i} className="asgn-summary-cell">
-                          <div className="asgn-summary-val" style={{color:s.color}}>{s.val}</div>
-                          <div className="asgn-summary-lbl">{s.label}</div>
-                        </div>
-                      ))}
+                /* ── HOME VIEW: Age group header + expandable subject cards ── */
+                <>
+                  <div className="main-top">
+                    <div>
+                      <div className="pg-h">{t('p_assignments_title')}</div>
+                      <div className="pg-s">
+                        {currentCurriculum.label} · {currentCurriculum.classEquiv}
+                      </div>
                     </div>
-                  )}
-
-                  {/* Personalized Recommendations — from weak quiz subjects */}
-                  {(() => {
-                    const weakSubjects = SUBJ.filter(s =>
-                      s.QuestionsAttempted >= 5 &&
-                      s.QuestionsAttempted > 0 &&
-                      (s.QuestionsCorrect / s.QuestionsAttempted) < 0.65
-                    );
-                    if (!weakSubjects.length) return null;
-                    return (
-                      <div className="card" style={{borderColor:'rgba(245,166,35,.3)',marginBottom:'20px'}}>
-                        <div className="card-t" style={{color:'var(--accent)'}}>
-                          <i className="fa-solid fa-lightbulb" /> Recommended Focus Areas
+                    {/* Age group badge */}
+                    <div style={{flexShrink:0,background:'rgba(0,198,167,.12)',border:'1px solid rgba(0,198,167,.25)',borderRadius:'12px',padding:'8px 16px',textAlign:'center'}}>
+                      <div style={{fontSize:'11px',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Age Group</div>
+                      <div style={{fontSize:'18px',fontWeight:900,color:'var(--teal)',fontFamily:'var(--fd)'}}>{studentAgeGroup}</div>
+                      <div style={{fontSize:'11px',color:'var(--muted)'}}>{currentCurriculum.classEquiv}</div>
+                    </div>
+                  </div>
+                  <div className="content">
+                    {/* Overall progress strip */}
+                    {(() => {
+                      const totalTopics   = AGE_SUBJECTS.reduce((s,subj)=>s+topicsForSubjectKey(subj.key).length,0);
+                      const completedTopics = AGE_SUBJECTS.reduce((s,subj)=>s+ageSubjectStats(subj.key).completed,0);
+                      const overallPct = totalTopics ? Math.round((completedTopics/totalTopics)*100) : 0;
+                      const pendingAsgns = ASGN.filter(a=>['Not Started','In Progress','Overdue'].includes(a.Status)).length;
+                      return (
+                        <div className="asgn-summary-strip" style={{marginBottom:'24px'}}>
+                          <div className="asgn-summary-cell"><div className="asgn-summary-val" style={{color:'var(--teal)'}}>{AGE_SUBJECTS.length}</div><div className="asgn-summary-lbl">Subjects</div></div>
+                          <div className="asgn-summary-cell"><div className="asgn-summary-val" style={{color:'#fff'}}>{totalTopics}</div><div className="asgn-summary-lbl">Total Topics</div></div>
+                          <div className="asgn-summary-cell"><div className="asgn-summary-val" style={{color:'#22c55e'}}>{completedTopics}</div><div className="asgn-summary-lbl">Completed</div></div>
+                          <div className="asgn-summary-cell"><div className="asgn-summary-val" style={{color:'var(--accent)'}}>{pendingAsgns}</div><div className="asgn-summary-lbl">Pending</div></div>
                         </div>
-                        <p style={{fontSize:'13px',color:'rgba(255,255,255,.6)',marginBottom:'14px',lineHeight:1.7}}>
-                          Based on your quiz performance, extra practice is recommended in:
-                        </p>
-                        {weakSubjects.map(s => {
-                          const acc = s.QuestionsAttempted ? Math.round((s.QuestionsCorrect/s.QuestionsAttempted)*100) : 0;
-                          return (
-                            <div key={s.Subject} style={{display:'flex',alignItems:'center',gap:'12px',padding:'11px 0',borderBottom:'1px solid rgba(255,255,255,.06)'}}>
-                              <div style={{width:'34px',height:'34px',borderRadius:'9px',background:`${s['Color (Hex)']}22`,color:s['Color (Hex)'],display:'flex',alignItems:'center',justifyContent:'center',fontSize:'14px',flexShrink:0}}>
-                                <i className="fa-solid fa-book" />
-                              </div>
-                              <div style={{flex:1}}>
-                                <div style={{fontWeight:700,color:'#fff',fontSize:'14px'}}>{s.Subject}</div>
-                                <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>
-                                  {s.QuestionsAttempted} questions attempted · {acc}% accuracy
-                                </div>
-                              </div>
-                              <span style={{fontSize:'11px',fontWeight:700,padding:'3px 9px',borderRadius:'100px',background:'rgba(239,68,68,.14)',color:'#f87171'}}>
-                                Needs Practice
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
+                      );
+                    })()}
 
-                  {/* All Assignments — sorted: Overdue → In Progress → Not Started → Completed */}
-                  <div className="card" style={{marginBottom:'22px'}}>
-                    <div className="card-t"><i className="fa-solid fa-list-check" /> {t('p_all_assignments')}</div>
-                    {ASGN.length === 0 ? (
-                      <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>
-                        No assignments yet — check back once your teacher posts one.
-                      </div>
-                    ) : ASGN.map(a => {
-                      const statusMeta = {
-                        'Overdue':     { cls:'overdue',   label:'⚠ Overdue',      dot:'#ef4444' },
-                        'Not Started': { cls:'pending',   label:'Not Started',    dot:'rgba(255,255,255,.3)' },
-                        'In Progress': { cls:'inprogress',label:'In Progress',    dot:'var(--accent)' },
-                        'Completed':   { cls:'submitted', label:'✓ Completed',    dot:'#22c55e' },
-                        'graded':      { cls:'graded',    label:`✓ ${a.Grade||'Graded'}`, dot:'#22c55e' },
-                        'submitted':   { cls:'submitted', label:'Submitted',      dot:'var(--teal)' },
-                        'pending':     { cls:'pending',   label:'Not Started',    dot:'rgba(255,255,255,.3)' },
-                      };
-                      const sm = statusMeta[a.Status] || statusMeta['Not Started'];
-
-                      // Due date urgency
-                      const dueStr = a.DueDate || a['Due Date'] || '';
-                      let dueColor = 'var(--muted)';
-                      if (a.Status === 'Overdue') dueColor = '#ef4444';
-                      else if (dueStr) {
-                        const daysAway = Math.ceil((new Date(dueStr) - new Date()) / 86400000);
-                        if (daysAway <= 1) dueColor = '#f97316';
-                        else if (daysAway <= 3) dueColor = 'var(--accent)';
-                      }
-
-                      // Progress bar for In Progress assignments
-                      const progressPct = a.ProgressPct ? Number(a.ProgressPct) : null;
+                    {/* Expandable subject cards */}
+                    <div className="sec-divider" style={{marginTop:0}}>Subjects for {studentAgeGroup}</div>
+                    {AGE_SUBJECTS.map((subj, si) => {
+                      const stats     = ageSubjectStats(subj.key);
+                      const isExpanded = expandedSubject === subj.key;
+                      const quizTopics = topicsForSubjectKey(subj.key);
 
                       return (
-                        <div key={a['Assignment ID'] || a.AssignmentID || Math.random()} className="asgn-item asgn-item-v2">
-                          <div className="asgn-dot" style={{background:sm.dot}} />
-                          <div className="asgn-body" style={{flex:1}}>
-                            <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px',flexWrap:'wrap'}}>
-                              <div>
-                                <div className="asgn-title">{a.Title}</div>
-                                <div className="asgn-meta">
-                                  {a.Subject}
-                                  {(a.DueDate||a['Due Date']) && <> · <span style={{color:dueColor,fontWeight:600}}>Due {a.DueDate||a['Due Date']}</span></>}
-                                  {a.Difficulty && <> · <span style={{color:'rgba(255,255,255,.4)'}}>{a.Difficulty}</span></>}
-                                  {a.Grade && <> · <span style={{color:'#4ade80',fontWeight:700}}>Grade: {a.Grade}</span></>}
-                                </div>
-                                {a.Description && (
-                                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.45)',marginTop:'4px',lineHeight:1.6}}>{a.Description}</div>
-                                )}
-                                {a.TeacherNotes && (
-                                  <div style={{fontSize:'12px',color:'rgba(0,198,167,.7)',marginTop:'4px',fontStyle:'italic'}}>📝 {a.TeacherNotes}</div>
-                                )}
+                        <div key={subj.key} className="age-subj-card" style={{borderColor: isExpanded ? subj.color+'44' : 'var(--border)'}}>
+                          {/* Card header — always visible, click to expand */}
+                          <div
+                            className="age-subj-header"
+                            onClick={() => setExpandedSubject(isExpanded ? null : subj.key)}
+                            role="button" tabIndex={0}
+                            onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();setExpandedSubject(isExpanded?null:subj.key);}}}
+                          >
+                            <div style={{display:'flex',alignItems:'center',gap:'14px',flex:1,minWidth:0}}>
+                              <div className="age-subj-icon" style={{background:`${subj.color}18`,color:subj.color,flexShrink:0}}>
+                                {subj.emoji || <i className={`fa-solid ${subj.icon}`} />}
                               </div>
-                              <span className={`asgn-badge ${sm.cls}`}>{sm.label}</span>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}}>
+                                  <span className="age-subj-name">{subj.key}</span>
+                                  {subj.comingSoon && <span className="age-coming-soon">Coming Soon</span>}
+                                </div>
+                                <div style={{fontSize:'12px',color:'var(--muted)',marginTop:'2px'}}>{subj.tagline}</div>
+                              </div>
                             </div>
-                            {progressPct !== null && (
-                              <div style={{marginTop:'8px'}}>
-                                <div style={{height:'5px',background:'rgba(255,255,255,.07)',borderRadius:'100px',overflow:'hidden'}}>
-                                  <div style={{height:'100%',width:`${progressPct}%`,background:'var(--teal)',borderRadius:'100px',transition:'width .4s'}} />
+                            {/* Progress summary (right side of header) */}
+                            <div style={{display:'flex',alignItems:'center',gap:'16px',flexShrink:0}}>
+                              {!subj.comingSoon && (
+                                <div style={{textAlign:'right'}}>
+                                  <div style={{fontSize:'18px',fontWeight:900,color:stats.pct>=75?'#22c55e':stats.pct>=40?'var(--accent)':'rgba(255,255,255,.6)',fontFamily:'var(--fd)'}}>{stats.pct}%</div>
+                                  <div style={{fontSize:'11px',color:'var(--muted)'}}>{stats.completed}/{stats.total} topics</div>
                                 </div>
-                                <div style={{fontSize:'11px',color:'var(--muted)',marginTop:'3px'}}>{progressPct}% complete</div>
-                              </div>
-                            )}
+                              )}
+                              <i className={`fa-solid fa-chevron-${isExpanded?'up':'down'}`} style={{color:'var(--muted)',fontSize:'13px'}} />
+                            </div>
                           </div>
+
+                          {/* Progress bar (always visible) */}
+                          {!subj.comingSoon && (
+                            <div style={{padding:'0 20px 12px'}}>
+                              <div style={{height:'5px',background:'rgba(255,255,255,.07)',borderRadius:'100px',overflow:'hidden'}}>
+                                <div style={{height:'100%',width:`${stats.pct}%`,background:stats.pct>=75?'#22c55e':stats.pct>=40?'var(--accent)':subj.color,borderRadius:'100px',transition:'width .6s ease'}} />
+                              </div>
+                              <div style={{display:'flex',justifyContent:'space-between',marginTop:'4px',fontSize:'11px',color:'var(--muted)'}}>
+                                <span>✓ {stats.completed} Completed</span>
+                                <span>○ {stats.remaining} Remaining</span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Expanded content */}
+                          {isExpanded && (
+                            <div className="age-subj-expanded">
+                              <div style={{padding:'0 20px 6px',borderTop:'1px solid rgba(255,255,255,.06)',marginTop:'4px'}}>
+
+                                {subj.comingSoon ? (
+                                  /* Coming soon state */
+                                  <div style={{textAlign:'center',padding:'24px 0'}}>
+                                    <div style={{fontSize:'32px',marginBottom:'10px'}}>🚧</div>
+                                    <div style={{fontWeight:700,color:'#fff',marginBottom:'6px'}}>Content Coming Soon</div>
+                                    <div style={{fontSize:'13px',color:'var(--muted)',lineHeight:1.7}}>
+                                      Your teacher will add {subj.key} topics to the sheet shortly.<br/>
+                                      The topics are ready — just waiting for content.
+                                    </div>
+                                    {/* Show the topic structure as a tree even when coming soon */}
+                                    <div style={{marginTop:'18px',textAlign:'left'}}>
+                                      <div style={{fontSize:'11px',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:'10px'}}>Topics Planned</div>
+                                      {subj.topics.map((topic,ti) => (
+                                        <div key={ti} style={{marginBottom:'8px',padding:'10px 12px',background:'rgba(255,255,255,.03)',borderRadius:'8px',border:'1px solid rgba(255,255,255,.05)'}}>
+                                          <div style={{fontWeight:700,color:'rgba(255,255,255,.7)',fontSize:'13px',marginBottom:'4px'}}>
+                                            <i className="fa-solid fa-folder-open" style={{color:subj.color,marginRight:'7px',fontSize:'11px'}} />{topic.name}
+                                          </div>
+                                          <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>
+                                            {topic.subtopics.map((st,sti)=>(
+                                              <span key={sti} style={{fontSize:'11px',padding:'2px 8px',background:'rgba(255,255,255,.05)',borderRadius:'100px',color:'var(--muted)'}}>{st}</span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : quizTopics.length === 0 ? (
+                                  /* Has curriculum tree but no quiz modules yet in the sheet */
+                                  <div style={{padding:'16px 0'}}>
+                                    <div style={{textAlign:'center',marginBottom:'16px'}}>
+                                      <div style={{fontSize:'13px',color:'var(--muted)',marginBottom:'4px'}}>No interactive lessons yet — your teacher will add them shortly.</div>
+                                      <button
+                                        className="btn-t"
+                                        style={{marginTop:'8px',fontSize:'12px',padding:'8px 16px'}}
+                                        onClick={()=>{setActiveAssignmentSubject(subj.key);setExpandedSubject(null);}}
+                                      >
+                                        <i className="fa-solid fa-plus" /> Browse Topics Anyway
+                                      </button>
+                                    </div>
+                                    {/* Still show topic tree */}
+                                    {subj.topics.map((topic,ti)=>(
+                                      <div key={ti} style={{marginBottom:'6px',padding:'9px 12px',background:'rgba(255,255,255,.03)',borderRadius:'8px',border:'1px solid rgba(255,255,255,.05)'}}>
+                                        <div style={{fontWeight:700,color:'rgba(255,255,255,.6)',fontSize:'13px'}}>
+                                          <i className="fa-solid fa-chevron-right" style={{color:subj.color,marginRight:'7px',fontSize:'10px'}} />{topic.name}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  /* Has quiz modules — show topic tree + quiz module list */
+                                  <>
+                                    <div style={{marginTop:'14px'}}>
+                                      {/* Topic tree from curriculum definition */}
+                                      <div style={{fontSize:'11px',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:'10px'}}>Topics</div>
+                                      {subj.topics.map((topic,ti) => {
+                                        // Match quiz modules to this topic by name (fuzzy — module Title contains topic name)
+                                        const topicModules = quizTopics.filter(m =>
+                                          m.Title.toLowerCase().includes(topic.name.toLowerCase().split(' ')[0])
+                                        );
+                                        return (
+                                          <div key={ti} style={{marginBottom:'8px',background:'rgba(255,255,255,.03)',borderRadius:'9px',border:'1px solid rgba(255,255,255,.05)',overflow:'hidden'}}>
+                                            <div style={{padding:'10px 12px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'10px'}}>
+                                              <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                                                <i className="fa-solid fa-folder-open" style={{color:subj.color,fontSize:'12px'}} />
+                                                <span style={{fontWeight:700,color:'rgba(255,255,255,.8)',fontSize:'13px'}}>{topic.name}</span>
+                                              </div>
+                                              {topicModules.length > 0 && (
+                                                <span style={{fontSize:'11px',padding:'2px 8px',background:`${subj.color}15`,color:subj.color,borderRadius:'100px',fontWeight:700,flexShrink:0}}>
+                                                  {topicModules.length} lesson{topicModules.length!==1?'s':''}
+                                                </span>
+                                              )}
+                                            </div>
+                                            {/* Subtopics */}
+                                            <div style={{padding:'0 12px 10px',display:'flex',flexWrap:'wrap',gap:'5px'}}>
+                                              {topic.subtopics.map((st,sti)=>(
+                                                <span key={sti} style={{fontSize:'11px',padding:'2px 8px',background:'rgba(255,255,255,.05)',borderRadius:'100px',color:'var(--muted)'}}>{st}</span>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {/* Quiz module list */}
+                                    <div style={{marginTop:'16px'}}>
+                                      <div style={{fontSize:'11px',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:'10px'}}>Interactive Lessons</div>
+                                      {quizTopics.slice(0,6).map(m => {
+                                        const prog = learnProgress[m['Module ID']];
+                                        const modPct = prog?.completionPct || 0;
+                                        const isDone = !!prog?.completedAt;
+                                        return (
+                                          <div
+                                            key={m['Module ID']}
+                                            className="lm-card"
+                                            style={{marginBottom:'8px',cursor:'pointer'}}
+                                            onClick={()=>{ setActiveAssignmentSubject(subj.key); setActiveModuleId(m['Module ID']); setExpandedSubject(null); }}
+                                          >
+                                            <div className="lm-icon" style={{background:`${m['Color (Hex)']}22`,color:m['Color (Hex)'],width:'36px',height:'36px',borderRadius:'9px'}}>
+                                              {m.Emoji || <i className={`fa-solid ${m['Icon (FontAwesome solid)']||'fa-book'}`} />}
+                                            </div>
+                                            <div style={{flex:1,minWidth:0}}>
+                                              <div style={{fontWeight:700,color:'#fff',fontSize:'13px'}}>{m.Title}</div>
+                                              {prog && (
+                                                <div style={{height:'3px',background:'rgba(255,255,255,.07)',borderRadius:'100px',marginTop:'5px',overflow:'hidden'}}>
+                                                  <div style={{height:'100%',width:`${isDone?100:modPct}%`,background:isDone?'#22c55e':'var(--teal)',borderRadius:'100px'}} />
+                                                </div>
+                                              )}
+                                            </div>
+                                            <span style={{fontSize:'11px',fontWeight:700,flexShrink:0,
+                                              color:isDone?'#22c55e':prog?'var(--accent)':'rgba(255,255,255,.4)'}}>
+                                              {isDone?'✓ Done':prog?`${modPct}%`:'Start'}
+                                            </span>
+                                          </div>
+                                        );
+                                      })}
+                                      {quizTopics.length > 6 && (
+                                        <button
+                                          className="btn-outline"
+                                          style={{width:'100%',justifyContent:'center',marginTop:'4px',fontSize:'12px',padding:'8px'}}
+                                          onClick={()=>{ setActiveAssignmentSubject(subj.key); setExpandedSubject(null); }}
+                                        >
+                                          View all {quizTopics.length} lessons <i className="fa-solid fa-arrow-right" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
-                  </div>
 
-                  {/* Homework submission card */}
-                  <div className="card">
-                    <div className="card-t"><i className="fa-solid fa-cloud-arrow-up" /> {t('p_submit_homework')}</div>
-                    <label className="upload-zone" htmlFor="hwFile">
-                      <div style={{fontSize:'30px',color:'var(--muted)',marginBottom:'10px'}}><i className="fa-solid fa-cloud-arrow-up" /></div>
-                      <p style={{fontSize:'14px',color:'rgba(255,255,255,.6)',marginBottom:'6px'}}>{S.UploadZonePrimary}</p>
-                      <p style={{fontSize:'12px',color:'var(--muted)'}}>{S.UploadZoneSub}</p>
-                    </label>
-                    <input id="hwFile" type="file" style={{display:'none'}} onChange={e=>{setUploadName(e.target.files[0]?.name||'');setUploadDone(false);}} />
-                    {uploadName && <p style={{fontSize:'13px',color:'var(--teal)',marginTop:'12px',fontWeight:600}}><i className="fa-solid fa-paperclip" /> {uploadName}</p>}
-                    <div style={{textAlign:'center',marginTop:'16px'}}>
-                      <button className="btn-t" onClick={()=>{ if(!uploadName){alert(S.UploadValidationError);return;} setUploadDone(true); }}>
-                        <i className="fa-solid fa-paper-plane" /> {t('p_submit_assignment')}
-                      </button>
+                    {/* Homework & Assignments section below subject cards */}
+                    <div className="sec-divider" style={{marginTop:'8px'}}>{t('p_homework_submissions')}</div>
+
+                    {ASGN.length > 0 && (
+                      <div className="asgn-summary-strip">
+                        {[
+                          { label:'Total',       val:ASGN.length,                                                       color:'var(--teal)' },
+                          { label:'Overdue',     val:ASGN.filter(a=>a.Status==='Overdue').length,                       color:'#ef4444'     },
+                          { label:'In Progress', val:ASGN.filter(a=>a.Status==='In Progress').length,                   color:'var(--accent)'},
+                          { label:'Completed',   val:ASGN.filter(a=>['Completed','graded','submitted'].includes(a.Status)).length, color:'#22c55e' },
+                        ].map((s,i)=>(
+                          <div key={i} className="asgn-summary-cell">
+                            <div className="asgn-summary-val" style={{color:s.color}}>{s.val}</div>
+                            <div className="asgn-summary-lbl">{s.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Recommendations from weak quiz subjects */}
+                    {(() => {
+                      const weakSubjects = AGE_SUBJECTS.filter(subj => {
+                        const stats = ageSubjectStats(subj.key);
+                        return stats.attempted >= 5 && (stats.correct/stats.attempted) < 0.65;
+                      });
+                      if (!weakSubjects.length) return null;
+                      return (
+                        <div className="card" style={{borderColor:'rgba(245,166,35,.3)',marginBottom:'20px'}}>
+                          <div className="card-t" style={{color:'var(--accent)'}}>
+                            <i className="fa-solid fa-lightbulb" /> Recommended Focus Areas
+                          </div>
+                          <p style={{fontSize:'13px',color:'rgba(255,255,255,.6)',marginBottom:'14px',lineHeight:1.7}}>
+                            Based on your quiz performance, extra practice is recommended in:
+                          </p>
+                          {weakSubjects.map(subj => {
+                            const stats = ageSubjectStats(subj.key);
+                            const acc = stats.attempted ? Math.round((stats.correct/stats.attempted)*100) : 0;
+                            return (
+                              <div key={subj.key} style={{display:'flex',alignItems:'center',gap:'12px',padding:'11px 0',borderBottom:'1px solid rgba(255,255,255,.06)'}}>
+                                <div style={{width:'34px',height:'34px',borderRadius:'9px',background:`${subj.color}22`,color:subj.color,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'14px',flexShrink:0}}>
+                                  <i className={`fa-solid ${subj.icon}`} />
+                                </div>
+                                <div style={{flex:1}}>
+                                  <div style={{fontWeight:700,color:'#fff',fontSize:'14px'}}>{subj.key}</div>
+                                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>{stats.attempted} questions attempted · {acc}% accuracy</div>
+                                </div>
+                                <span style={{fontSize:'11px',fontWeight:700,padding:'3px 9px',borderRadius:'100px',background:'rgba(239,68,68,.14)',color:'#f87171'}}>
+                                  Needs Practice
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+
+                    {/* All Assignments list */}
+                    <div className="card" style={{marginBottom:'22px'}}>
+                      <div className="card-t"><i className="fa-solid fa-list-check" /> {t('p_all_assignments')}</div>
+                      {ASGN.length === 0 ? (
+                        <div style={{textAlign:'center',color:'var(--muted)',fontSize:'13px',padding:'20px 0'}}>
+                          No assignments yet — check back once your teacher posts one.
+                        </div>
+                      ) : ASGN.map(a => {
+                        const statusMeta = {
+                          'Overdue':     {cls:'overdue',   label:'⚠ Overdue',    dot:'#ef4444'             },
+                          'Not Started': {cls:'pending',   label:'Not Started',  dot:'rgba(255,255,255,.3)'},
+                          'In Progress': {cls:'inprogress',label:'In Progress',  dot:'var(--accent)'       },
+                          'Completed':   {cls:'submitted', label:'✓ Completed',  dot:'#22c55e'             },
+                          'graded':      {cls:'graded',    label:`✓ ${a.Grade||'Graded'}`, dot:'#22c55e'   },
+                          'submitted':   {cls:'submitted', label:'Submitted',    dot:'var(--teal)'         },
+                          'pending':     {cls:'pending',   label:'Not Started',  dot:'rgba(255,255,255,.3)'},
+                        };
+                        const sm = statusMeta[a.Status] || statusMeta['Not Started'];
+                        const dueStr = a.DueDate || a['Due Date'] || '';
+                        let dueColor = 'var(--muted)';
+                        if (a.Status==='Overdue') dueColor='#ef4444';
+                        else if (dueStr) {
+                          const daysAway = Math.ceil((new Date(dueStr)-new Date())/86400000);
+                          if (daysAway<=1) dueColor='#f97316'; else if(daysAway<=3) dueColor='var(--accent)';
+                        }
+                        return (
+                          <div key={a['Assignment ID']||a.AssignmentID||Math.random()} className="asgn-item asgn-item-v2">
+                            <div className="asgn-dot" style={{background:sm.dot}} />
+                            <div className="asgn-body" style={{flex:1}}>
+                              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px',flexWrap:'wrap'}}>
+                                <div>
+                                  <div className="asgn-title">{a.Title}</div>
+                                  <div className="asgn-meta">
+                                    {a.Subject}
+                                    {dueStr && <> · <span style={{color:dueColor,fontWeight:600}}>Due {dueStr}</span></>}
+                                    {a.Difficulty && <> · <span style={{color:'rgba(255,255,255,.4)'}}>{a.Difficulty}</span></>}
+                                    {a.Grade && <> · <span style={{color:'#4ade80',fontWeight:700}}>Grade: {a.Grade}</span></>}
+                                  </div>
+                                  {a.TeacherNotes && <div style={{fontSize:'12px',color:'rgba(0,198,167,.7)',marginTop:'4px',fontStyle:'italic'}}>📝 {a.TeacherNotes}</div>}
+                                </div>
+                                <span className={`asgn-badge ${sm.cls}`}>{sm.label}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    {uploadDone && <div style={{background:'rgba(34,197,94,.1)',border:'1px solid rgba(34,197,94,.2)',color:'#4ade80',borderRadius:'10px',padding:'13px',fontSize:'13px',fontWeight:600,marginTop:'14px',textAlign:'center'}}>✅ {uploadMsg}</div>}
+
+                    {/* Homework submission */}
+                    <div className="card">
+                      <div className="card-t"><i className="fa-solid fa-cloud-arrow-up" /> {t('p_submit_homework')}</div>
+                      <label className="upload-zone" htmlFor="hwFile">
+                        <div style={{fontSize:'30px',color:'var(--muted)',marginBottom:'10px'}}><i className="fa-solid fa-cloud-arrow-up" /></div>
+                        <p style={{fontSize:'14px',color:'rgba(255,255,255,.6)',marginBottom:'6px'}}>{S.UploadZonePrimary}</p>
+                        <p style={{fontSize:'12px',color:'var(--muted)'}}>{S.UploadZoneSub}</p>
+                      </label>
+                      <input id="hwFile" type="file" style={{display:'none'}} onChange={e=>{setUploadName(e.target.files[0]?.name||'');setUploadDone(false);}} />
+                      {uploadName && <p style={{fontSize:'13px',color:'var(--teal)',marginTop:'12px',fontWeight:600}}><i className="fa-solid fa-paperclip" /> {uploadName}</p>}
+                      <div style={{textAlign:'center',marginTop:'16px'}}>
+                        <button className="btn-t" onClick={()=>{ if(!uploadName){alert(S.UploadValidationError);return;} setUploadDone(true); }}>
+                          <i className="fa-solid fa-paper-plane" /> {t('p_submit_assignment')}
+                        </button>
+                      </div>
+                      {uploadDone && <div style={{background:'rgba(34,197,94,.1)',border:'1px solid rgba(34,197,94,.2)',color:'#4ade80',borderRadius:'10px',padding:'13px',fontSize:'13px',fontWeight:600,marginTop:'14px',textAlign:'center'}}>✅ {uploadMsg}</div>}
+                    </div>
                   </div>
-                </div>
+                </>
               ) : !activeModuleId ? (
                 /* ── STEP 2: Topic grid, filtered to the chosen subject ── */
                 <div className="content">
-                  <button className="lp-back" onClick={()=>setActiveAssignmentSubject(null)}><i className="fa-solid fa-arrow-left" /> {t('p_back_to_subjects')}</button>
+                  <div className="asgn-breadcrumb">
+                    <span className="asgn-crumb" onClick={()=>{setActiveAssignmentSubject(null);setActiveModuleId(null);setExpandedSubject(null);}}>{t('p_breadcrumb_assignments')}</span>
+                    <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
+                    <span className="asgn-crumb-current">{activeAssignmentSubject}</span>
+                  </div>
+                  <button className="lp-back" onClick={()=>setActiveAssignmentSubject(null)}><i className="fa-solid fa-arrow-left" /> Back to Subjects</button>
                   <div className="sec-divider" style={{marginTop:0}}>{activeAssignmentSubject} {t('p_topics_suffix')}</div>
-                  <LearningModulesGrid modules={topicsForSubject(activeAssignmentSubject)} stepsFor={stepsFor} progressMap={learnProgress} onOpen={setActiveModuleId} t={t} />
+                  <LearningModulesGrid modules={topicsForSubjectKey(activeAssignmentSubject)} stepsFor={stepsFor} progressMap={learnProgress} onOpen={setActiveModuleId} t={t} />
                 </div>
               ) : (
                 /* ── STEP 3: Introduction → Progressive Learning → Completion ── */
-                <LearningModulePlayer
-                  module={LMOD.find(m=>m['Module ID']===activeModuleId)}
-                  steps={stepsFor(activeModuleId)}
-                  progress={learnProgress[activeModuleId]}
-                  onSave={patch=>saveLearnProgress(activeModuleId, patch)}
-                  onAnswer={recordAnswer}
-                  onExit={()=>setActiveModuleId(null)}
-                  backLabel={`${t('p_back_to')} ${activeAssignmentSubject} ${t('p_topics_suffix')}`}
-                  t={t}
-                />
+                <>
+                  <div className="asgn-breadcrumb">
+                    <span className="asgn-crumb" onClick={()=>{setActiveAssignmentSubject(null);setActiveModuleId(null);setExpandedSubject(null);}}>{t('p_breadcrumb_assignments')}</span>
+                    <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
+                    <span className="asgn-crumb" onClick={()=>setActiveModuleId(null)}>{activeAssignmentSubject}</span>
+                    <i className="fa-solid fa-chevron-right asgn-crumb-sep" />
+                    <span className="asgn-crumb-current">{LMOD.find(m=>m['Module ID']===activeModuleId)?.Title}</span>
+                  </div>
+                  <LearningModulePlayer
+                    module={LMOD.find(m=>m['Module ID']===activeModuleId)}
+                    steps={stepsFor(activeModuleId)}
+                    progress={learnProgress[activeModuleId]}
+                    onSave={patch=>saveLearnProgress(activeModuleId, patch)}
+                    onAnswer={recordAnswer}
+                    onExit={()=>setActiveModuleId(null)}
+                    backLabel={`${t('p_back_to')} ${activeAssignmentSubject} ${t('p_topics_suffix')}`}
+                    t={t}
+                  />
+                </>
               )}
             </>)}
+
 
 
             {/* SCHEDULE */}
@@ -2149,17 +2681,97 @@ function PortalInner() {
                     </div>
                   </div>
                   <div className="card-t"><i className="fa-solid fa-id-card" /> {t('p_account_details')}</div>
-                  <div className="prof-g">
-                    {mergedProfile.map((f,i)=>(
-                      <div key={i} className="prof-field">
-                        <span className="prof-label">{f.label}</span>
-                        {profileEdit && !f.readonly
-                          ? <input defaultValue={f.val} className="prof-inp" />
-                          : <span className="prof-val">{f.val}</span>}
-                      </div>
-                    ))}
-                  </div>
-                  {profileEdit && <div style={{marginTop:'24px'}}><button className="btn-t" onClick={()=>setProfileEdit(false)}><i className="fa-solid fa-check" /> {t('p_save_changes')}</button></div>}
+                  <form id="profile-edit-form">
+                    <div className="prof-g">
+                      {mergedProfile.map((f,i)=>(
+                        <div key={i} className="prof-field">
+                          <span className="prof-label">{f.label}</span>
+                          {profileEdit && !f.readonly
+                            ? f.fieldKey === 'ClassLevel'
+                              ? (
+                                /* Dropdown for class level — prevents free-text typos that
+                                   would break the age-group mapping in the Assignments tab */
+                                <select
+                                  name={f.fieldKey}
+                                  defaultValue={f.val}
+                                  className="prof-inp"
+                                >
+                                  <option value="Class 1">Class 1 (Age 5–6)</option>
+                                  <option value="Class 2">Class 2 (Age 6–7)</option>
+                                  <option value="Class 3">Class 3 (Age 7–8)</option>
+                                  <option value="Class 4">Class 4 (Age 8–9)</option>
+                                  <option value="Class 5">Class 5 (Age 9–10)</option>
+                                </select>
+                              )
+                              : <input
+                                  name={f.fieldKey || f.label.toLowerCase().replace(/\s+/g,'_')}
+                                  defaultValue={f.val}
+                                  className="prof-inp"
+                                />
+                            : <span className="prof-val">{f.val}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </form>
+                  {profileEdit && (
+                    <div style={{marginTop:'24px',display:'flex',gap:'10px',flexWrap:'wrap'}}>
+                      <button
+                        className="btn-t"
+                        disabled={!!saving}
+                        onClick={async () => {
+                          // Read all edited values from the form
+                          const form = document.getElementById('profile-edit-form');
+                          if (!form) return;
+                          const fd = new FormData(form);
+                          // Build the updates object from field keys defined in mergedProfile
+                          const updates = {};
+                          mergedProfile.forEach(f => {
+                            if (f.readonly) return;
+                            const key = f.fieldKey || f.label.toLowerCase().replace(/\s+/g,'_');
+                            const val = fd.get(key);
+                            if (val !== null) updates[f.fieldKey || key] = val;
+                          });
+                          setSaving('profile');
+                          try {
+                            const r = await fetch('/api/student/profile', {
+                              method: 'POST',
+                              headers: {'Content-Type':'application/json'},
+                              body: JSON.stringify({ studentId: profile.id, ...updates }),
+                            });
+                            const data = await r.json();
+                            if (data.success) {
+                              // Update profile state immediately so the UI
+                              // reflects the change without a page reload.
+                              // classLevel is the critical one — it drives the
+                              // age group shown on the Assignments tab.
+                              if (updates.ClassLevel || updates.class_level) {
+                                const newClass = updates.ClassLevel || updates.class_level;
+                                setProfile(p => ({ ...p, classLevel: newClass }));
+                              }
+                              if (updates.FullName || updates.full_name) {
+                                const newName = updates.FullName || updates.full_name;
+                                setProfile(p => ({ ...p, name: newName }));
+                              }
+                              setProfileEdit(false);
+                            } else {
+                              alert('Could not save: ' + (data.message || 'Unknown error'));
+                            }
+                          } catch (err) {
+                            alert('Save failed: ' + err.message);
+                          } finally {
+                            setSaving(null);
+                          }
+                        }}
+                      >
+                        {saving==='profile'
+                          ? <><i className="fa-solid fa-circle-notch fa-spin" /> Saving…</>
+                          : <><i className="fa-solid fa-check" /> {t('p_save_changes')}</>}
+                      </button>
+                      <button className="btn-outline" onClick={()=>setProfileEdit(false)} style={{padding:'11px 18px'}}>
+                        <i className="fa-solid fa-xmark" /> {t('p_cancel')}
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="card">
                   <div className="card-t"><i className="fa-solid fa-lock" /> {t('p_change_password')}</div>
