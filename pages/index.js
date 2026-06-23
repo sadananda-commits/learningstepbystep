@@ -179,13 +179,20 @@ function HomeInner() {
   const [lbPage, setLbPage] = useState(0);
   const LB_PAGE_SIZE = 10;
 
-  const [formStatus, setFormStatus] = useState({ state: 'idle', studentId: '', username: '', tempPassword: '' });
+  const [formStatus, setFormStatus] = useState({ state: 'idle', studentId: '', username: '', tempPassword: '', note: '' });
   const [openFaq, setOpenFaq]       = useState(null);
+  // Role selector: null = not yet chosen, 'Student'/'Parent'/'Teacher' = chosen
+  const [enrollRole, setEnrollRole] = useState(null);
   const [step, setStep]             = useState(1);
   const [formData, setFormData]     = useState({
     studentName: '', dob: '', gender: '', schoolName: '', classLevel: '',
     parentName: '', email: '', phone: '', emergencyContact: '', address: '',
     teacherId: '', timeSlot: '', learningMode: '', subjects: [],
+  });
+  // Parent / Teacher form data (separate — never mixes with student fields)
+  const [ptFormData, setPtFormData] = useState({
+    fullName: '', email: '', phone: '', address: '',
+    linkedStudentId: '', subject: '', qualification: '',
   });
 
   const saveStepAndAdvance = (e, nextStep) => {
@@ -224,8 +231,47 @@ function HomeInner() {
       const res  = await fetch('/api/enroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json();
       if (res.ok && data.success) {
-        setFormStatus({ state: 'success', studentId: data.studentId, username: data.username, tempPassword: data.tempPassword });
+        setFormStatus({ state: 'success', studentId: data.studentId, username: data.username, tempPassword: data.tempPassword, note: '' });
         setFormData({ studentName:'', dob:'', gender:'', schoolName:'', classLevel:'', parentName:'', email:'', phone:'', emergencyContact:'', address:'', teacherId:'', timeSlot:'', learningMode:'', subjects:[] });
+        setStep(1);
+      } else {
+        setFormStatus({ state: 'error', message: data.message || t('f_generic_error'), studentId: '', username: '', tempPassword: '' });
+      }
+    } catch {
+      setFormStatus({ state: 'error', message: t('f_connection_failed'), studentId: '', username: '', tempPassword: '' });
+    }
+  };
+
+  // ── PT form: save details and advance to confirm step ───────────────────
+  const saveStepAndAdvancePT = (e, nextStep) => {
+    const fd = new FormData(e.currentTarget.closest('form'));
+    setPtFormData(prev => ({
+      ...prev,
+      fullName:        fd.get('fullName')        || prev.fullName,
+      email:           fd.get('email')           || prev.email,
+      phone:           fd.get('phone')           || prev.phone,
+      address:         fd.get('address')         || prev.address,
+      linkedStudentId: fd.get('linkedStudentId') || prev.linkedStudentId,
+      subject:         fd.get('subject')         || prev.subject,
+      qualification:   fd.get('qualification')   || prev.qualification,
+    }));
+    setStep(nextStep);
+  };
+
+  // ── Parent / Teacher registration submit ────────────────────────────────
+  const handleEnrollPT = async (e) => {
+    e.preventDefault();
+    setFormStatus({ state: 'loading', studentId: '', username: '', tempPassword: '' });
+    try {
+      const res  = await fetch('/api/enroll-pt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: enrollRole, ...ptFormData }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setFormStatus({ state: 'success', studentId: data.id, username: data.username, tempPassword: data.tempPassword, note: data.note || '' });
+        setPtFormData({ fullName:'', email:'', phone:'', address:'', linkedStudentId:'', subject:'', qualification:'' });
         setStep(1);
       } else {
         setFormStatus({ state: 'error', message: data.message || t('f_generic_error'), studentId: '', username: '', tempPassword: '' });
@@ -501,6 +547,15 @@ function HomeInner() {
 
           /* ENROLL FORM */
           .form-wrap{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:24px;padding:44px;margin-top:44px;}
+          /* Role selector — Step 0 */
+          .role-selector-g{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px;}
+          .role-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px 20px;cursor:pointer;text-align:center;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:12px;}
+          .role-card:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.2);transform:translateY(-2px);}
+          .role-card-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;}
+          .role-card-label{font-family:var(--font-d);font-size:16px;font-weight:900;color:#fff;}
+          .role-card-desc{font-size:12px;color:rgba(255,255,255,.5);line-height:1.5;}
+          .role-card-arrow{font-size:12px;color:rgba(255,255,255,.3);margin-top:4px;}
+          @media(max-width:640px){.role-selector-g{grid-template-columns:1fr;}}
           .steps{display:flex;gap:0;margin-bottom:36px;}
           .step-item{flex:1;display:flex;flex-direction:column;align-items:center;position:relative;}
           .step-item:not(:last-child)::after{content:'';position:absolute;top:18px;left:50%;width:100%;height:2px;background:rgba(255,255,255,.1);}
@@ -1009,25 +1064,93 @@ function HomeInner() {
           <p className="sec-sub">{t('enroll_sub')}</p>
 
           {formStatus.state === 'success' ? (
+            /* ── SUCCESS CARD — adapts to role ── */
             <div className="success-card">
               <div style={{display:'flex',alignItems:'center',gap:'12px',marginBottom:'20px'}}>
-                <div style={{width:'44px',height:'44px',borderRadius:'12px',background:'var(--teal)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',color:'#fff',flexShrink:0}}><i className="fa-solid fa-circle-check"></i></div>
+                <div style={{width:'44px',height:'44px',borderRadius:'12px',background:'var(--teal)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',color:'#fff',flexShrink:0}}>
+                  <i className="fa-solid fa-circle-check"></i>
+                </div>
                 <div>
-                  <div style={{fontWeight:800,fontSize:'17px',color:'#fff'}}>{t('f_success_title')}</div>
-                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>{t('f_success_sub')}</div>
+                  <div style={{fontWeight:800,fontSize:'17px',color:'#fff'}}>
+                    {enrollRole === 'Student' ? t('f_success_title') : t('f_pt_success_title')}
+                  </div>
+                  <div style={{fontSize:'12px',color:'rgba(255,255,255,.5)'}}>
+                    {enrollRole === 'Student' ? t('f_success_sub') : t('f_pt_success_sub')}
+                  </div>
                 </div>
               </div>
               <div className="cred-g">
-                <div className="cred-box"><div className="cred-lbl">{t('f_cred_student_id')}</div><div className="cred-val" style={{color:'var(--teal)'}}>{formStatus.studentId}</div></div>
-                <div className="cred-box"><div className="cred-lbl">{t('f_cred_username')}</div><div className="cred-val" style={{color:'#fff'}}>{formStatus.username}</div></div>
-                <div className="cred-box"><div className="cred-lbl">{t('f_cred_temp_password')}</div><div className="cred-val" style={{color:'var(--accent)'}}>{formStatus.tempPassword}</div></div>
+                <div className="cred-box">
+                  <div className="cred-lbl">{enrollRole === 'Student' ? t('f_cred_student_id') : t('f_pt_cred_id')}</div>
+                  <div className="cred-val" style={{color:'var(--teal)'}}>{formStatus.studentId}</div>
+                </div>
+                <div className="cred-box">
+                  <div className="cred-lbl">{t('f_cred_username')}</div>
+                  <div className="cred-val" style={{color:'#fff'}}>{formStatus.username}</div>
+                </div>
+                <div className="cred-box">
+                  <div className="cred-lbl">{t('f_cred_temp_password')}</div>
+                  <div className="cred-val" style={{color:'var(--accent)'}}>{formStatus.tempPassword}</div>
+                </div>
               </div>
+              {enrollRole !== 'Student' && formStatus.note && (
+                <div style={{background:'rgba(0,198,167,.08)',border:'1px solid rgba(0,198,167,.2)',borderRadius:'10px',padding:'12px 14px',fontSize:'13px',color:'rgba(255,255,255,.7)',marginBottom:'16px',lineHeight:1.7}}>
+                  ℹ️ {formStatus.note}
+                </div>
+              )}
               <p style={{fontSize:'12px',color:'rgba(255,255,255,.45)',marginBottom:'20px',lineHeight:1.7}}>{t('f_cred_warning')}</p>
-              <a href="/portal" className="btn btn-accent"><i className="fa-solid fa-arrow-right-to-bracket"></i> {t('f_go_to_portal')}</a>
+              {enrollRole === 'Student'
+                ? <a href="/portal"        className="btn btn-accent"><i className="fa-solid fa-arrow-right-to-bracket"></i> {t('f_go_to_portal')}</a>
+                : <a href="/parent-portal" className="btn btn-accent"><i className="fa-solid fa-arrow-right-to-bracket"></i> {t('f_pt_go_to_portal')}</a>
+              }
+              <button
+                onClick={()=>{ setFormStatus({state:'idle',studentId:'',username:'',tempPassword:'',note:''}); setEnrollRole(null); setStep(1); }}
+                style={{display:'block',marginTop:'14px',background:'none',border:'none',color:'rgba(255,255,255,.4)',fontSize:'12px',cursor:'pointer',textDecoration:'underline'}}>
+                Register someone else
+              </button>
             </div>
-          ) : (
+
+          ) : !enrollRole ? (
+            /* ── STEP 0: ROLE SELECTOR ── */
+            <div className="form-wrap">
+              <div style={{textAlign:'center',marginBottom:'28px'}}>
+                <div style={{fontSize:'22px',fontWeight:800,color:'#fff',marginBottom:'8px'}}>{t('enroll_role_heading')}</div>
+                <div style={{fontSize:'14px',color:'rgba(255,255,255,.55)'}}>{t('enroll_role_sub')}</div>
+              </div>
+              <div className="role-selector-g">
+                {[
+                  { role:'Student', icon:'fa-user-graduate', label:t('enroll_role_student'), desc:t('enroll_role_student_d'), color:'var(--teal)' },
+                  { role:'Parent',  icon:'fa-heart',         label:t('enroll_role_parent'),  desc:t('enroll_role_parent_d'),  color:'#a855f7'    },
+                  { role:'Teacher', icon:'fa-chalkboard-user',label:t('enroll_role_teacher'),desc:t('enroll_role_teacher_d'), color:'var(--accent)'},
+                ].map(r => (
+                  <button
+                    key={r.role}
+                    type="button"
+                    className="role-card"
+                    onClick={() => { setEnrollRole(r.role); setStep(1); setFormStatus({state:'idle',studentId:'',username:'',tempPassword:'',note:''}); }}
+                  >
+                    <div className="role-card-icon" style={{background:`${r.color}18`,color:r.color}}>
+                      <i className={`fa-solid ${r.icon}`}></i>
+                    </div>
+                    <div className="role-card-label">{r.label}</div>
+                    <div className="role-card-desc">{r.desc}</div>
+                    <div className="role-card-arrow"><i className="fa-solid fa-arrow-right"></i></div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+          ) : enrollRole === 'Student' ? (
+            /* ── STUDENT: existing 4-step flow ── */
             <form onSubmit={handleEnroll}>
               <div className="form-wrap">
+                <button type="button" onClick={()=>{setEnrollRole(null);setStep(1);}} style={{background:'none',border:'none',color:'rgba(255,255,255,.45)',fontSize:'12px',cursor:'pointer',marginBottom:'16px',display:'flex',alignItems:'center',gap:'6px'}}>
+                  <i className="fa-solid fa-arrow-left"></i> {t('enroll_role_heading')}
+                </button>
+                <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'20px',padding:'10px 14px',background:'rgba(0,198,167,.08)',borderRadius:'10px',border:'1px solid rgba(0,198,167,.15)'}}>
+                  <i className="fa-solid fa-user-graduate" style={{color:'var(--teal)'}}></i>
+                  <span style={{fontSize:'13px',fontWeight:700,color:'var(--teal)'}}>{t('enroll_role_student')} — {t('enroll_role_student_d')}</span>
+                </div>
                 {/* STEP INDICATOR */}
                 <div className="steps">
                   {[t('enroll_step_student'),t('enroll_step_parent'),t('enroll_step_course'),t('enroll_step_confirm')].map((s,i)=>(
@@ -1136,9 +1259,7 @@ function HomeInner() {
                       </div>
                     </div>
                     <div style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:'10px',padding:'14px 18px',marginBottom:'16px'}}>
-                      <p style={{fontSize:'12px',color:'rgba(255,255,255,.4)',lineHeight:1.8}}>
-                        {t('f_review_disclaimer')}
-                      </p>
+                      <p style={{fontSize:'12px',color:'rgba(255,255,255,.4)',lineHeight:1.8}}>{t('f_review_disclaimer')}</p>
                     </div>
                     {formStatus.state==='error' && <div className="status-err">⚠ {formStatus.message}</div>}
                     <button type="submit" className="btn-submit" disabled={formStatus.state==='loading'}>
@@ -1146,6 +1267,116 @@ function HomeInner() {
                     </button>
                     <div className="step-nav" style={{marginTop:'12px'}}>
                       <button type="button" className="btn-back" onClick={()=>setStep(3)}><i className="fa-solid fa-arrow-left"></i> {t('f_back')}</button>
+                      <span></span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </form>
+
+          ) : (
+            /* ── PARENT / TEACHER: 2-step flow ── */
+            <form onSubmit={handleEnrollPT}>
+              <div className="form-wrap">
+                <button type="button" onClick={()=>{setEnrollRole(null);setStep(1);}} style={{background:'none',border:'none',color:'rgba(255,255,255,.45)',fontSize:'12px',cursor:'pointer',marginBottom:'16px',display:'flex',alignItems:'center',gap:'6px'}}>
+                  <i className="fa-solid fa-arrow-left"></i> {t('enroll_role_heading')}
+                </button>
+                {/* Role badge */}
+                <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'20px',padding:'10px 14px',
+                  background: enrollRole==='Teacher' ? 'rgba(245,166,35,.08)' : 'rgba(168,85,247,.08)',
+                  borderRadius:'10px',
+                  border: enrollRole==='Teacher' ? '1px solid rgba(245,166,35,.2)' : '1px solid rgba(168,85,247,.2)'}}>
+                  <i className={`fa-solid ${enrollRole==='Teacher'?'fa-chalkboard-user':'fa-heart'}`}
+                    style={{color: enrollRole==='Teacher' ? 'var(--accent)' : '#a855f7'}}></i>
+                  <span style={{fontSize:'13px',fontWeight:700,color: enrollRole==='Teacher' ? 'var(--accent)' : '#a855f7'}}>
+                    {enrollRole==='Teacher' ? t('enroll_role_teacher') : t('enroll_role_parent')} — {enrollRole==='Teacher' ? t('enroll_role_teacher_d') : t('enroll_role_parent_d')}
+                  </span>
+                </div>
+
+                {/* Step indicator — 2 steps only */}
+                <div className="steps">
+                  {['Your Details', 'Review & Confirm'].map((s,i)=>(
+                    <div key={i} className={`step-item${step>i+1?' done':step===i+1?' active':''}`}>
+                      <div className="step-circle">{step>i+1?<i className="fa-solid fa-check"></i>:i+1}</div>
+                      <span className="step-lbl">{s}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* STEP 1 — Personal details */}
+                {step===1 && (
+                  <div>
+                    <div className="fg-2">
+                      <div className="fg"><label className="fl">{t('f_pt_full_name')}</label><input name="fullName" required className="fi" placeholder={t('f_pt_full_name_ph')} defaultValue={ptFormData.fullName} /></div>
+                      <div className="fg"><label className="fl">{t('f_pt_email')}</label><input name="email" type="email" required className="fi" placeholder="name@email.com" defaultValue={ptFormData.email} /></div>
+                    </div>
+                    <div className="fg-2">
+                      <div className="fg"><label className="fl">{t('f_pt_phone')}</label><input name="phone" type="tel" required className="fi" placeholder={t('f_pt_phone_ph')} defaultValue={ptFormData.phone} /></div>
+                      <div className="fg"><label className="fl">{t('f_pt_address')}</label><input name="address" className="fi" placeholder={t('f_pt_address_ph')} defaultValue={ptFormData.address} /></div>
+                    </div>
+
+                    {/* Parent-only: child's student ID */}
+                    {enrollRole === 'Parent' && (
+                      <div className="fg">
+                        <label className="fl">{t('f_pt_child_id')}</label>
+                        <input name="linkedStudentId" className="fi" placeholder={t('f_pt_child_id_ph')} defaultValue={ptFormData.linkedStudentId} />
+                        <p style={{fontSize:'12px',color:'rgba(255,255,255,.35)',marginTop:'6px',lineHeight:1.7}}>{t('f_pt_child_id_help')}</p>
+                      </div>
+                    )}
+
+                    {/* Teacher-only: subject + qualification */}
+                    {enrollRole === 'Teacher' && (
+                      <div className="fg-2">
+                        <div className="fg"><label className="fl">{t('f_pt_subject')}</label><input name="subject" className="fi" placeholder={t('f_pt_subject_ph')} defaultValue={ptFormData.subject} /></div>
+                        <div className="fg"><label className="fl">{t('f_pt_qualification')}</label><input name="qualification" className="fi" placeholder={t('f_pt_qualification_ph')} defaultValue={ptFormData.qualification} /></div>
+                      </div>
+                    )}
+
+                    <div className="step-nav">
+                      <span></span>
+                      <button type="button" className="btn-next" onClick={(e)=>saveStepAndAdvancePT(e,2)}>
+                        {t('f_review_confirm')} <i className="fa-solid fa-arrow-right"></i>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* STEP 2 — Review & confirm */}
+                {step===2 && (
+                  <div>
+                    <div style={{background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.09)',borderRadius:'12px',padding:'20px',marginBottom:'20px'}}>
+                      <p style={{fontSize:'12px',fontWeight:700,color:'var(--teal)',marginBottom:'14px',letterSpacing:'0.5px',textTransform:'uppercase'}}>{t('f_review_title')}</p>
+                      <div className="review-g">
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_review_role')}</span>{enrollRole}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_review_name')}</span>{ptFormData.fullName || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_review_email')}</span>{ptFormData.email || '—'}</div>
+                        <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_review_phone')}</span>{ptFormData.phone || '—'}</div>
+                        {enrollRole==='Parent' && ptFormData.linkedStudentId && (
+                          <div><span style={{color:'rgba(255,255,255,.4)'}}>Child ID: </span>{ptFormData.linkedStudentId}</div>
+                        )}
+                        {enrollRole==='Teacher' && ptFormData.subject && (
+                          <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_subject')}: </span>{ptFormData.subject}</div>
+                        )}
+                        {enrollRole==='Teacher' && ptFormData.qualification && (
+                          <div><span style={{color:'rgba(255,255,255,.4)'}}>{t('f_pt_qualification')}: </span>{ptFormData.qualification}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:'10px',padding:'14px 18px',marginBottom:'16px'}}>
+                      <p style={{fontSize:'12px',color:'rgba(255,255,255,.4)',lineHeight:1.8}}>
+                        {enrollRole==='Parent'
+                          ? 'Your account will be created instantly. Log in to the Parent & Teacher Portal with the credentials shown on the next screen. Your child\'s profile will be linked within 24 hours if you didn\'t provide their Student ID.'
+                          : 'Your teacher account will be created instantly. The academy will configure your student access. Log in to the Parent & Teacher Portal with the credentials shown on the next screen.'}
+                      </p>
+                    </div>
+                    {formStatus.state==='error' && <div className="status-err">⚠ {formStatus.message}</div>}
+                    <button type="submit" className="btn-submit" disabled={formStatus.state==='loading'}>
+                      {formStatus.state==='loading'
+                        ? <><i className="fa-solid fa-circle-notch fa-spin"></i> {t('f_creating_account')}</>
+                        : <><i className="fa-solid fa-paper-plane"></i> Create My Account</>}
+                    </button>
+                    <div className="step-nav" style={{marginTop:'12px'}}>
+                      <button type="button" className="btn-back" onClick={()=>setStep(1)}><i className="fa-solid fa-arrow-left"></i> {t('f_back')}</button>
                       <span></span>
                     </div>
                   </div>
