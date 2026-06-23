@@ -1,33 +1,26 @@
 // pages/api/student/auth.js
-// Authenticates via Script 1 (Vedanta Academy Students sheet)
 
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzPphEigUXVQnH2QUvpmTt-R1tDf3D_I9UnTqBs-D5axUp31zcy6i0ptYiL6rol5hCU/exec';
+const SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
+  'https://script.google.com/macros/s/AKfycbzPphEigUXVQnH2QUvpmTt-R1tDf3D_I9UnTqBs-D5axUp31zcy6i0ptYiL6rol5hCU/exec';
 
-let accountsCache   = null;
-let accountsCacheAt = 0;
-const ACCOUNTS_TTL  = 5 * 60 * 1000;
+let _cache = null;
+let _cacheAt = 0;
+const TTL = 5 * 60 * 1000;
+
+export function bustCache() {
+  _cache = null;
+  _cacheAt = 0;
+}
 
 async function getAccounts() {
-  if (accountsCache && Date.now() - accountsCacheAt < ACCOUNTS_TTL) {
-    console.log('[auth] Cache hit, accounts:', accountsCache.length);
-    return accountsCache;
-  }
-  const url  = `${SCRIPT_URL}?action=accounts`;
-  console.log('[auth] Fetching:', url);
-  const res  = await fetch(url, { signal: AbortSignal.timeout(12000) });
-  const raw  = await res.text();
-  console.log('[auth] Response (500 chars):', raw.slice(0, 500));
-  const data = JSON.parse(raw);
+  if (_cache && Date.now() - _cacheAt < TTL) return _cache;
+  const res  = await fetch(`${SCRIPT_URL}?action=accounts`, { signal: AbortSignal.timeout(12000) });
+  const data = await res.json();
   if (data.error) throw new Error(data.error);
-  if (!Array.isArray(data.accounts)) throw new Error(`No accounts array. Keys: ${Object.keys(data).join(', ')}`);
-  console.log('[auth] Loaded', data.accounts.length, 'accounts');
-  if (data.accounts[0]) {
-    const s = { ...data.accounts[0], Password: '***' };
-    console.log('[auth] Sample row:', JSON.stringify(s));
-  }
-  accountsCache   = data.accounts;
-  accountsCacheAt = Date.now();
-  return accountsCache;
+  if (!Array.isArray(data.accounts)) throw new Error('No accounts array returned');
+  _cache   = data.accounts;
+  _cacheAt = Date.now();
+  return _cache;
 }
 
 function safeEqual(a, b) {
@@ -40,6 +33,7 @@ function safeEqual(a, b) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
+
   const { username = '', password = '' } = req.body || {};
   if (!username.trim() || !password.trim())
     return res.status(400).json({ authenticated: false, message: 'Username and password are required.' });
@@ -48,10 +42,9 @@ export default async function handler(req, res) {
   try {
     accounts = await getAccounts();
   } catch (err) {
-    console.error('[auth]', err.message);
-    if (accountsCache) { accounts = accountsCache; }
-    else return res.status(503).json({ authenticated: false, message: 'Auth service unavailable.',
-      ...(process.env.NODE_ENV !== 'production' && { debug: err.message }) });
+    console.error('[auth] getAccounts failed:', err.message);
+    if (_cache) { accounts = _cache; }
+    else return res.status(503).json({ authenticated: false, message: 'Auth service unavailable.' });
   }
 
   const input   = username.trim().toLowerCase();
@@ -60,32 +53,31 @@ export default async function handler(req, res) {
     (r.StudentID && r.StudentID.trim().toLowerCase() === input)
   );
 
-  if (!account) {
-    console.warn('[auth] Not found:', input, '| Available:', accounts.map(r => r.Username || r.StudentID));
-    return res.status(401).json({ authenticated: false, message: 'Invalid credentials.' });
-  }
+  if (!account)
+    return res.status(401).json({ authenticated: false, message: 'Invalid username or password.' });
 
-  // Active column is optional — if missing or empty, treat account as active.
-  // Only block if explicitly set to FALSE/NO/0.
-  const activeVal = String(account.Active || '').trim().toLowerCase();
-  const isInactive = ['false', 'no', '0'].includes(activeVal);
-  if (isInactive) {
-    console.warn('[auth] Account inactive:', account.Username);
-    return res.status(401).json({ authenticated: false, message: 'Account inactive. Contact your academy.' });
-  }
+  const active = String(account.Active || '').trim().toLowerCase();
+  if (['false', 'no', '0'].includes(active))
+    return res.status(401).json({ authenticated: false, message: 'Account is inactive.' });
 
-  if (!safeEqual(String(account.Password || ''), password.trim())) {
-    console.warn('[auth] Password mismatch for:', account.Username,
-      '| stored length:', account.Password?.length, '| entered length:', password.trim().length);
-    return res.status(401).json({ authenticated: false, message: 'Invalid credentials.' });
-  }
+  if (!safeEqual(String(account.Password || ''), password.trim()))
+    return res.status(401).json({ authenticated: false, message: 'Invalid username or password.' });
 
-  console.log('[auth] Login success:', account.Username, account.StudentID);
+  // Log raw account columns — visible in Vercel function logs
+  console.log('[auth] RAW ACCOUNT ROW for', input, ':', JSON.stringify({ ...account, Password: '***' }));
+
+  const classLevel = account.ClassLevel || account['Class Level'] || account.Class || '';
+
+  console.log('[auth] classLevel resolved to:', JSON.stringify(classLevel));
+
   return res.status(200).json({
     authenticated: true,
-    username:   account.Username   || username,
     studentId:  account.StudentID  || '',
-    fullName:   account.FullName   || account.Username || '',
-    classLevel: account.ClassLevel || account.Class    || 'Class 3',
+    username:   account.Username   || username,
+    fullName:   account.FullName   || account.DisplayName || account.StudentName || username,
+    // Return exactly what the sheet has. Empty string = not set yet.
+    // The portal detects blank and shows a "please set your class" prompt.
+    // Never default to 'Class 3' here — that's what caused the bug all along.
+    classLevel: classLevel,
   });
 }
