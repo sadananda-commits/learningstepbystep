@@ -83,7 +83,9 @@ export default async function handler(req, res) {
   console.log('[auth] Login success:', account.Username, account.StudentID);
   return res.status(200).json({
     authenticated: true,
-    username:  account.Username  || username,
-    studentId: account.StudentID || '',
+    username:   account.Username   || username,
+    studentId:  account.StudentID  || '',
+    fullName:   account.FullName   || account.Username || '',
+    classLevel: account.ClassLevel || account.Class    || 'Class 3',
   });
 }
